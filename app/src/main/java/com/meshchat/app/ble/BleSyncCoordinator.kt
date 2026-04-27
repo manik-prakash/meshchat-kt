@@ -2,6 +2,7 @@ package com.meshchat.app.ble
 
 import android.util.Log
 import com.meshchat.app.data.repository.ConversationRepository
+import com.meshchat.app.data.repository.IdentityRepository
 import com.meshchat.app.domain.BlePayload
 import com.meshchat.app.domain.Conversation
 import com.meshchat.app.domain.Message
@@ -19,7 +20,8 @@ import java.util.concurrent.ConcurrentHashMap
 
 class BleSyncCoordinator(
     private val bleMeshManager: BleMeshManager,
-    private val conversationRepo: ConversationRepository
+    private val conversationRepo: ConversationRepository,
+    private val identityRepo: IdentityRepository
 ) {
     private val TAG = "BleSyncCoord"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -64,13 +66,7 @@ class BleSyncCoordinator(
     }
 
     suspend fun sendMessage(msg: Message, payload: BlePayload.Message) {
-        try {
-            bleMeshManager.sendMessage(payload)
-        } catch (e: Exception) {
-            Log.w(TAG, "sendMessage failed for ${msg.id}: ${e.message}")
-            conversationRepo.updateMessageStatus(msg.id, MessageStatus.FAILED)
-            return
-        }
+        // Register before sending so a fast ACK isn't dropped by handleAck()
         val timeoutJob = scope.launch {
             delay(10_000)
             if (pendingAcks.remove(msg.id) != null) {
@@ -79,6 +75,14 @@ class BleSyncCoordinator(
             }
         }
         pendingAcks[msg.id] = timeoutJob
+
+        try {
+            bleMeshManager.sendMessage(payload)
+        } catch (e: Exception) {
+            Log.w(TAG, "sendMessage failed for ${msg.id}: ${e.message}")
+            pendingAcks.remove(msg.id)?.cancel()
+            conversationRepo.updateMessageStatus(msg.id, MessageStatus.FAILED)
+        }
     }
 
     // ── Event loop ────────────────────────────────────────────────────────────
@@ -111,6 +115,11 @@ class BleSyncCoordinator(
         val conversation = resolveConversation(handshake.deviceId, handshake.displayName, fromAddress)
         resolvedSessions[fromAddress] = conversation.id
         messageBuffer.remove(fromAddress)?.forEach { processIncomingMessage(it, conversation.id) }
+        // Send our identity back so the central can also resolve the conversation
+        val identity = identityRepo.ensureIdentity()
+        for (fragment in MeshProtocolCodec.encode(BlePayload.Handshake(identity.deviceId, identity.displayName))) {
+            bleMeshManager.gattServer.sendNotification(BleConstants.HANDSHAKE_CHAR_UUID, fragment)
+        }
     }
 
     private suspend fun handleMessage(msg: BlePayload.Message, fromAddress: String) {

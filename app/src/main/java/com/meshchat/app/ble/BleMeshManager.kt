@@ -297,13 +297,16 @@ class BleMeshManager(
             connectedGatt = gatt
             updateState()
 
+            // Subscribe to all notifications before writing our handshake so we
+            // don't miss Device B's handshake response notification.
+            enableNotifications(gatt, HANDSHAKE_CHAR_UUID)
+            enableNotifications(gatt, MESSAGE_CHAR_UUID)
+            enableNotifications(gatt, ACK_CHAR_UUID)
             val identity = identityRepo.ensureIdentity()
             writeFragmentsCentral(
                 gatt, HANDSHAKE_CHAR_UUID,
                 BlePayload.Handshake(identity.deviceId, identity.displayName)
             )
-            enableNotifications(gatt, MESSAGE_CHAR_UUID)
-            enableNotifications(gatt, ACK_CHAR_UUID)
 
             true
         } catch (e: Exception) {

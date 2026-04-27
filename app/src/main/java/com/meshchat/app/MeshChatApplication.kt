@@ -12,7 +12,7 @@ class AppContainer(app: Application) {
     val identityRepository = IdentityRepository(db.identityDao())
     val conversationRepository = ConversationRepository(db.conversationDao(), db.messageDao(), db.peerDao())
     val bleMeshManager = BleMeshManager(app, identityRepository, conversationRepository)
-    val bleSyncCoordinator = BleSyncCoordinator(bleMeshManager, conversationRepository)
+    val bleSyncCoordinator = BleSyncCoordinator(bleMeshManager, conversationRepository, identityRepository)
 }
 
 class MeshChatApplication : Application() {
