@@ -1,8 +1,9 @@
 package com.meshchat.app.domain
 
 sealed class BlePayload {
+    /** nodeId is the sender's stable public key (base64 DER X.509), used as routing identity. */
     data class Handshake(
-        val deviceId: String,
+        val nodeId: String,
         val displayName: String
     ) : BlePayload()
 
@@ -20,7 +21,8 @@ sealed class BlePayload {
         val nodeId: String,
         val displayName: String,
         val timestamp: Long,
-        val seqNum: Int
+        val seqNum: Int,
+        val signature: String
     ) : BlePayload()
 
     /** Mesh-routed message carrying full relay metadata. */
@@ -49,7 +51,8 @@ sealed class BlePayload {
     data class DeliveryAck(
         val packetId: String,
         val destinationNodeId: String,
-        val timestamp: Long
+        val timestamp: Long,
+        val signature: String
     ) : BlePayload()
 
     /** Routing failure report propagated back toward the source. */
@@ -57,6 +60,7 @@ sealed class BlePayload {
         val packetId: String,
         val failingNodeId: String,
         val reason: FailureReason,
-        val timestamp: Long
+        val timestamp: Long,
+        val signature: String
     ) : BlePayload()
 }

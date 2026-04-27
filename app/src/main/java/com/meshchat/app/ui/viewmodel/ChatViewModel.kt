@@ -27,11 +27,11 @@ class ChatViewModel(
         .getMessages(conversationId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    private val _myDeviceId = MutableStateFlow("")
-    val myDeviceId: StateFlow<String> = _myDeviceId.asStateFlow()
+    private val _myPublicKey = MutableStateFlow("")
+    val myPublicKey: StateFlow<String> = _myPublicKey.asStateFlow()
 
     init {
-        viewModelScope.launch { _myDeviceId.value = identityRepo.ensureIdentity().deviceId }
+        viewModelScope.launch { _myPublicKey.value = identityRepo.ensureIdentity().publicKey }
     }
 
     fun sendMessage(text: String) {
@@ -40,7 +40,7 @@ class ChatViewModel(
             val identity = identityRepo.ensureIdentity()
             val msg = conversationRepo.insertMessage(
                 conversationId = conversationId,
-                senderDeviceId = identity.deviceId,
+                senderDeviceId = identity.publicKey,
                 text = text.take(500),
                 status = MessageStatus.SENDING
             )
@@ -48,7 +48,7 @@ class ChatViewModel(
                 msg,
                 BlePayload.Message(
                     id             = msg.id,
-                    senderDeviceId = identity.deviceId,
+                    senderDeviceId = identity.publicKey,
                     text           = msg.text,
                     timestamp      = msg.createdAt
                 )
@@ -66,7 +66,7 @@ class ChatViewModel(
                 msg,
                 BlePayload.Message(
                     id             = msg.id,
-                    senderDeviceId = identity.deviceId,
+                    senderDeviceId = identity.publicKey,
                     text           = msg.text,
                     timestamp      = msg.createdAt
                 )

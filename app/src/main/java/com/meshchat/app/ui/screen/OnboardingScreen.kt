@@ -18,11 +18,11 @@ import kotlinx.coroutines.delay
 
 private val BOOT_LINES = listOf(
     "MeshChat v0.1.0-alpha",
-    "protocol  : BLE direct",
+    "protocol  : BLE mesh",
     "storage   : Room/SQLite",
-    "encryption: planned v0.2",
+    "identity  : EC P-256 / Keystore",
     "──────────────────────────",
-    "initializing identity...",
+    "generating keypair...",
 )
 
 @Composable
@@ -60,7 +60,7 @@ fun OnboardingScreen(vm: OnboardingViewModel, onDone: () -> Unit) {
 
         if (bootFinished && identity != null) {
             Spacer(Modifier.height(24.dp))
-            Text("device_id : ${identity!!.deviceId.take(8)}", fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = TextMuted)
+            Text("fingerprint: ${identity!!.publicKeyFingerprint.ifEmpty { "..." }}", fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = TextMuted)
             Spacer(Modifier.height(16.dp))
             Text("> enter display name (max 24):", fontFamily = FontFamily.Monospace, fontSize = 13.sp, color = Accent)
             Spacer(Modifier.height(8.dp))

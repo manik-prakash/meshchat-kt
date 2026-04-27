@@ -59,7 +59,7 @@ class BleSyncCoordinator(
             return null
         }
 
-        val conversation = resolveConversation(handshake.deviceId, handshake.displayName, bleId)
+        val conversation = resolveConversation(handshake.nodeId, handshake.displayName, bleId)
         resolvedSessions[bleId] = conversation.id
         messageBuffer.remove(bleId)?.forEach { processIncomingMessage(it, conversation.id) }
         return conversation
@@ -118,12 +118,12 @@ class BleSyncCoordinator(
             return
         }
         // Inbound connection (we are peripheral): resolve session ourselves
-        val conversation = resolveConversation(handshake.deviceId, handshake.displayName, fromAddress)
+        val conversation = resolveConversation(handshake.nodeId, handshake.displayName, fromAddress)
         resolvedSessions[fromAddress] = conversation.id
         messageBuffer.remove(fromAddress)?.forEach { processIncomingMessage(it, conversation.id) }
         // Send our identity back so the central can also resolve the conversation
         val identity = identityRepo.ensureIdentity()
-        for (fragment in MeshProtocolCodec.encode(BlePayload.Handshake(identity.deviceId, identity.displayName))) {
+        for (fragment in MeshProtocolCodec.encode(BlePayload.Handshake(identity.publicKey, identity.displayName))) {
             bleMeshManager.gattServer.sendNotification(BleConstants.HANDSHAKE_CHAR_UUID, fragment)
         }
     }
@@ -161,31 +161,31 @@ class BleSyncCoordinator(
     // ── Session resolution ────────────────────────────────────────────────────
 
     private suspend fun resolveConversation(
-        deviceId: String,
+        peerPublicKey: String,
         displayName: String,
         bleId: String
     ): Conversation {
-        // 1. Exact match by stable deviceId
-        var conv = conversationRepo.getConversationByPeerDeviceId(deviceId)
+        // 1. Exact match by stable public key (stored in peerDeviceId column)
+        var conv = conversationRepo.getConversationByPeerDeviceId(peerPublicKey)
 
         if (conv == null) {
-            // 2. Legacy repair: same display name, deviceId changed (e.g. app reinstall on their device)
+            // 2. Legacy repair: old installs stored a UUID there, fall back to display name
             val byName = conversationRepo.getConversationByPeerDisplayName(displayName)
             if (byName != null) {
-                Log.i(TAG, "Repairing peer identity: ${byName.peerDeviceId} -> $deviceId")
-                conversationRepo.repairPeerIdentity(byName.id, deviceId, displayName)
-                conv = byName.copy(peerDeviceId = deviceId, peerDisplayName = displayName)
+                Log.i(TAG, "Migrating peer identity to public key: ${byName.peerDeviceId.take(16)} -> ${peerPublicKey.take(16)}")
+                conversationRepo.repairPeerIdentity(byName.id, peerPublicKey, displayName)
+                conv = byName.copy(peerDeviceId = peerPublicKey, peerDisplayName = displayName)
             }
         }
 
         if (conv == null) {
             // 3. Brand new peer
-            conv = conversationRepo.getOrCreateConversation(deviceId, displayName)
+            conv = conversationRepo.getOrCreateConversation(peerPublicKey, displayName)
         }
 
         // Always update peer record with current BLE address
         conversationRepo.upsertPeer(
-            Peer(deviceId = deviceId, displayName = displayName,
+            Peer(deviceId = peerPublicKey, displayName = displayName,
                  lastSeen = System.currentTimeMillis(), rssi = null, bleId = bleId)
         )
 

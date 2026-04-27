@@ -28,7 +28,7 @@ import java.util.Locale
 @Composable
 fun ChatScreen(vm: ChatViewModel, peerName: String, onBack: () -> Unit) {
     val messages    by vm.messages.collectAsState()
-    val myDeviceId  by vm.myDeviceId.collectAsState()
+    val myDeviceId  by vm.myPublicKey.collectAsState()
     val listState   = rememberLazyListState()
     val scope       = rememberCoroutineScope()
     var input       by remember { mutableStateOf("") }

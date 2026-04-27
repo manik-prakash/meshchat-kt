@@ -305,7 +305,7 @@ class BleMeshManager(
             val identity = identityRepo.ensureIdentity()
             writeFragmentsCentral(
                 gatt, HANDSHAKE_CHAR_UUID,
-                BlePayload.Handshake(identity.deviceId, identity.displayName)
+                BlePayload.Handshake(identity.publicKey, identity.displayName)
             )
 
             true

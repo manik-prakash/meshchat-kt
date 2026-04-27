@@ -6,6 +6,7 @@ enum class RouteAction {
     DELIVERED,
     DROPPED_TTL,
     DROPPED_DUPLICATE,
+    DROPPED_INVALID_SIG,
     QUEUED,
     DEQUEUED
 }

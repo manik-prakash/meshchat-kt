@@ -42,7 +42,7 @@ fun SettingsScreen(vm: SettingsViewModel) {
         Spacer(Modifier.height(16.dp))
 
         identity?.let { id ->
-            SettingsRow("device_id", id.deviceId)
+            SettingsRow("fingerprint", id.publicKeyFingerprint.ifEmpty { "generating..." })
             SettingsRow("created",   SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(id.createdAt)))
             Spacer(Modifier.height(20.dp))
 
@@ -86,7 +86,7 @@ fun SettingsScreen(vm: SettingsViewModel) {
         SettingsRow("version",   "0.1.0-alpha")
         SettingsRow("protocol",  "BLE direct")
         SettingsRow("storage",   "Room/SQLite")
-        SettingsRow("encryption","planned v0.2")
+        SettingsRow("identity",  "EC P-256 / Keystore")
     }
 }
 

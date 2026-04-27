@@ -1,5 +1,7 @@
 package com.meshchat.app.routing
 
+import android.util.Log
+import com.meshchat.app.crypto.CryptoManager
 import com.meshchat.app.data.db.entity.NeighborEntity
 import com.meshchat.app.data.repository.MeshRepository
 import com.meshchat.app.domain.BlePayload
@@ -36,6 +38,7 @@ interface MeshRouter {
  * @param selfNodeId    this node's stable public key (from IdentityRepository)
  * @param scope         coroutine scope owned by the calling component
  * @param meshRepository persistent routing state (seen packets, relay queue, neighbors)
+ * @param crypto        signing and verification (private key never leaves Keystore)
  * @param forwardPacket called when a packet should be relayed to neighbors
  * @param deliverLocally called when a packet is addressed to this node
  */
@@ -43,12 +46,25 @@ class MeshRouterImpl(
     private val selfNodeId: String,
     private val scope: CoroutineScope,
     private val meshRepository: MeshRepository,
+    private val crypto: CryptoManager,
     private val forwardPacket: suspend (packet: BlePayload.RoutedMessage, excludeNeighbor: String?) -> Unit,
     private val deliverLocally: suspend (packet: BlePayload.RoutedMessage) -> Unit,
 ) : MeshRouter {
 
+    private val TAG = "MeshRouter"
+
     override fun onBeaconReceived(packet: BlePayload.Beacon, fromNeighbor: String) {
         scope.launch {
+            if (packet.signature.isNotEmpty()) {
+                val valid = crypto.verifyBeacon(
+                    packet.nodeId, packet.nodeId, packet.displayName,
+                    packet.timestamp, packet.seqNum, packet.signature
+                )
+                if (!valid) {
+                    Log.w(TAG, "Dropping beacon from $fromNeighbor: invalid signature")
+                    return@launch
+                }
+            }
             meshRepository.upsertNeighbor(
                 NeighborEntity(
                     neighborPublicKey = packet.nodeId,
@@ -68,6 +84,24 @@ class MeshRouterImpl(
 
     override fun onMessageReceived(packet: BlePayload.RoutedMessage, fromNeighbor: String) {
         scope.launch {
+            // Verify signature before any processing — reject unauthenticated packets
+            if (packet.signature.isNotEmpty()) {
+                val valid = crypto.verifyRoutedMessage(
+                    packet.sourcePublicKey,
+                    packet.packetId, packet.sourcePublicKey, packet.destinationPublicKey,
+                    packet.timestamp, packet.body, packet.signature
+                )
+                if (!valid) {
+                    Log.w(TAG, "Dropping packet ${packet.packetId}: invalid signature from ${packet.sourcePublicKey.take(16)}")
+                    meshRepository.logRouteEvent(packet.packetId, RouteAction.DROPPED_INVALID_SIG)
+                    return@launch
+                }
+            } else {
+                Log.w(TAG, "Received unsigned packet ${packet.packetId} — dropping")
+                meshRepository.logRouteEvent(packet.packetId, RouteAction.DROPPED_INVALID_SIG)
+                return@launch
+            }
+
             if (meshRepository.isSeen(packet.packetId)) {
                 meshRepository.logRouteEvent(packet.packetId, RouteAction.DROPPED_DUPLICATE)
                 return@launch
@@ -109,8 +143,13 @@ class MeshRouterImpl(
         destinationDisplayName: String,
         text: String
     ) {
+        val packetId = UUID.randomUUID().toString()
+        val timestamp = System.currentTimeMillis()
+        val signature = crypto.signRoutedMessage(
+            packetId, selfNodeId, destinationId, timestamp, text
+        )
         val packet = BlePayload.RoutedMessage(
-            packetId = UUID.randomUUID().toString(),
+            packetId = packetId,
             sourcePublicKey = selfNodeId,
             destinationPublicKey = destinationId,
             destinationDisplayNameSnapshot = destinationDisplayName,
@@ -118,8 +157,8 @@ class MeshRouterImpl(
             ttl = DEFAULT_TTL,
             hopCount = 0,
             routingMode = RoutingMode.BROADCAST,
-            timestamp = System.currentTimeMillis(),
-            signature = "",  // TODO: sign with sender's key
+            timestamp = timestamp,
+            signature = signature,
             body = text
         )
         meshRepository.markSeen(packet.packetId)

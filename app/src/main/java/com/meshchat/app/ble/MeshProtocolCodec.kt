@@ -15,18 +15,18 @@ import java.util.concurrent.ConcurrentHashMap
  *   [type: 1 byte] [payload bytes...]
  *
  * Legacy types (BLE direct):
- *   0x01 handshake:      [nameLen:1] [name:utf8] [idLen:1] [id:utf8]
+ *   0x01 handshake:      [nameLen:1] [name:utf8] [pkLen:1] [nodeId:utf8]  (nodeId = base64 public key)
  *   0x02 message:        [idLen:1] [id:utf8] [senderLen:1] [sender:utf8] [text:utf8 rest]
  *   0x03 ack:            [idLen:1] [id:utf8]
  *
  * Mesh routing types:
- *   0x04 beacon:         [nodeId:1+n] [displayName:1+n] [timestamp:8BE] [seqNum:4BE]
+ *   0x04 beacon:         [nodeId:1+n] [displayName:1+n] [timestamp:8BE] [seqNum:4BE] [sig:1+n]
  *   0x05 routedMessage:  [packetId:1+n] [srcKey:1+n] [dstKey:1+n] [dstName:1+n]
  *                        [geoHint:1+n] [ttl:1] [hopCount:1] [routingMode:1]
  *                        [timestamp:8BE] [sig:1+n] [body:2+n]
  *   0x06 routeAck:       [packetId:1+n] [hopNodeId:1+n] [timestamp:8BE]
- *   0x07 deliveryAck:    [packetId:1+n] [dstNodeId:1+n] [timestamp:8BE]
- *   0x08 routeFailure:   [packetId:1+n] [failNodeId:1+n] [reason:1] [timestamp:8BE]
+ *   0x07 deliveryAck:    [packetId:1+n] [dstNodeId:1+n] [timestamp:8BE] [sig:1+n]
+ *   0x08 routeFailure:   [packetId:1+n] [failNodeId:1+n] [reason:1] [timestamp:8BE] [sig:1+n]
  *
  * Fragmentation for payloads > CHUNK_SIZE:
  *   0xF0 fragStart:    [totalLen:2 BE] [seqTotal:1] [data...]
@@ -75,12 +75,12 @@ object MeshProtocolCodec {
         when (payload) {
             is BlePayload.Handshake -> {
                 val nameBytes = payload.displayName.toByteArray(Charsets.UTF_8)
-                val idBytes   = payload.deviceId.take(8).toByteArray(Charsets.UTF_8)
+                val pkBytes   = payload.nodeId.toByteArray(Charsets.UTF_8)
                 out.write(TYPE_HANDSHAKE.toInt())
                 out.write(nameBytes.size)
                 out.write(nameBytes)
-                out.write(idBytes.size)
-                out.write(idBytes)
+                out.write(pkBytes.size)
+                out.write(pkBytes)
             }
             is BlePayload.Message -> {
                 val idBytes     = payload.id.take(12).toByteArray(Charsets.UTF_8)
@@ -105,6 +105,7 @@ object MeshProtocolCodec {
                 out.writeStr1(payload.displayName)
                 out.writeLongBE(payload.timestamp)
                 out.writeIntBE(payload.seqNum)
+                out.writeStr1(payload.signature)
             }
             is BlePayload.RoutedMessage -> {
                 out.write(TYPE_ROUTED_MSG.toInt())
@@ -131,6 +132,7 @@ object MeshProtocolCodec {
                 out.writeStr1(payload.packetId)
                 out.writeStr1(payload.destinationNodeId)
                 out.writeLongBE(payload.timestamp)
+                out.writeStr1(payload.signature)
             }
             is BlePayload.RouteFailure -> {
                 out.write(TYPE_ROUTE_FAILURE.toInt())
@@ -138,6 +140,7 @@ object MeshProtocolCodec {
                 out.writeStr1(payload.failingNodeId)
                 out.write(payload.reason.id.toInt() and 0xFF)
                 out.writeLongBE(payload.timestamp)
+                out.writeStr1(payload.signature)
             }
         }
         return out.toByteArray()
@@ -234,9 +237,9 @@ object MeshProtocolCodec {
                 val nameLen     = bytes[off++].toInt() and 0xFF
                 val displayName = String(bytes, off, nameLen, Charsets.UTF_8)
                 off            += nameLen
-                val idLen       = bytes[off++].toInt() and 0xFF
-                val deviceId    = String(bytes, off, idLen, Charsets.UTF_8)
-                BlePayload.Handshake(deviceId = deviceId, displayName = displayName)
+                val pkLen       = bytes[off++].toInt() and 0xFF
+                val nodeId      = String(bytes, off, pkLen, Charsets.UTF_8)
+                BlePayload.Handshake(nodeId = nodeId, displayName = displayName)
             }
             TYPE_MESSAGE -> {
                 val idLen          = bytes[off++].toInt() and 0xFF
@@ -258,7 +261,8 @@ object MeshProtocolCodec {
                 val (displayName, o2) = bytes.readStr1(o1)
                 val timestamp         = bytes.readLongBE(o2)
                 val seqNum            = bytes.readIntBE(o2 + 8)
-                BlePayload.Beacon(nodeId = nodeId, displayName = displayName, timestamp = timestamp, seqNum = seqNum)
+                val (sig, _)          = bytes.readStr1(o2 + 12)
+                BlePayload.Beacon(nodeId = nodeId, displayName = displayName, timestamp = timestamp, seqNum = seqNum, signature = sig)
             }
             TYPE_ROUTED_MSG -> {
                 val (packetId, o1)  = bytes.readStr1(off)
@@ -296,14 +300,16 @@ object MeshProtocolCodec {
                 val (packetId, o1)  = bytes.readStr1(off)
                 val (dstNodeId, o2) = bytes.readStr1(o1)
                 val timestamp       = bytes.readLongBE(o2)
-                BlePayload.DeliveryAck(packetId = packetId, destinationNodeId = dstNodeId, timestamp = timestamp)
+                val (sig, _)        = bytes.readStr1(o2 + 8)
+                BlePayload.DeliveryAck(packetId = packetId, destinationNodeId = dstNodeId, timestamp = timestamp, signature = sig)
             }
             TYPE_ROUTE_FAILURE -> {
                 val (packetId, o1)   = bytes.readStr1(off)
                 val (failNodeId, o2) = bytes.readStr1(o1)
                 val reason           = FailureReason.fromId(bytes[o2])
                 val timestamp        = bytes.readLongBE(o2 + 1)
-                BlePayload.RouteFailure(packetId = packetId, failingNodeId = failNodeId, reason = reason, timestamp = timestamp)
+                val (sig, _)         = bytes.readStr1(o2 + 9)
+                BlePayload.RouteFailure(packetId = packetId, failingNodeId = failNodeId, reason = reason, timestamp = timestamp, signature = sig)
             }
             else -> throw IllegalArgumentException("Unknown packet type: 0x${type.toString(16)}")
         }
