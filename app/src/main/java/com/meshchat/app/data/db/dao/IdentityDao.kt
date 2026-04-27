@@ -19,4 +19,7 @@ interface IdentityDao {
 
     @Query("UPDATE identity SET has_completed_onboarding = 1")
     suspend fun markOnboardingComplete()
+
+    @Query("UPDATE identity SET public_key = :publicKey")
+    suspend fun updatePublicKey(publicKey: String)
 }

@@ -6,11 +6,16 @@ import com.meshchat.app.ble.BleSyncCoordinator
 import com.meshchat.app.data.db.AppDatabase
 import com.meshchat.app.data.repository.ConversationRepository
 import com.meshchat.app.data.repository.IdentityRepository
+import com.meshchat.app.data.repository.MeshRepository
 
 class AppContainer(app: Application) {
     val db = AppDatabase.getInstance(app)
     val identityRepository = IdentityRepository(db.identityDao())
     val conversationRepository = ConversationRepository(db.conversationDao(), db.messageDao(), db.peerDao())
+    val meshRepository = MeshRepository(
+        db.seenPacketDao(), db.relayQueueDao(), db.neighborDao(),
+        db.knownContactDao(), db.routeEventDao()
+    )
     val bleMeshManager = BleMeshManager(app, identityRepository, conversationRepository)
     val bleSyncCoordinator = BleSyncCoordinator(bleMeshManager, conversationRepository, identityRepository)
 }

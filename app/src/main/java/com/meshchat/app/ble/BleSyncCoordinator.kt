@@ -98,9 +98,15 @@ class BleSyncCoordinator(
 
     private suspend fun handlePayload(payload: BlePayload, fromAddress: String) {
         when (payload) {
-            is BlePayload.Handshake -> handleHandshake(payload, fromAddress)
-            is BlePayload.Message   -> handleMessage(payload, fromAddress)
-            is BlePayload.Ack       -> handleAck(payload)
+            is BlePayload.Handshake      -> handleHandshake(payload, fromAddress)
+            is BlePayload.Message        -> handleMessage(payload, fromAddress)
+            is BlePayload.Ack            -> handleAck(payload)
+            // Mesh routing packets are handled by MeshRouter, not this coordinator
+            is BlePayload.Beacon,
+            is BlePayload.RoutedMessage,
+            is BlePayload.RouteAck,
+            is BlePayload.DeliveryAck,
+            is BlePayload.RouteFailure   -> { /* forwarded to MeshRouter when wired up */ }
         }
     }
 
