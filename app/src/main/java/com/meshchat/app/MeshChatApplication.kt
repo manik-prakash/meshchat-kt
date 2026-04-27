@@ -2,6 +2,7 @@ package com.meshchat.app
 
 import android.app.Application
 import com.meshchat.app.ble.BleMeshManager
+import com.meshchat.app.ble.BleSyncCoordinator
 import com.meshchat.app.data.db.AppDatabase
 import com.meshchat.app.data.repository.ConversationRepository
 import com.meshchat.app.data.repository.IdentityRepository
@@ -11,8 +12,14 @@ class AppContainer(app: Application) {
     val identityRepository = IdentityRepository(db.identityDao())
     val conversationRepository = ConversationRepository(db.conversationDao(), db.messageDao(), db.peerDao())
     val bleMeshManager = BleMeshManager(app, identityRepository, conversationRepository)
+    val bleSyncCoordinator = BleSyncCoordinator(bleMeshManager, conversationRepository)
 }
 
 class MeshChatApplication : Application() {
     val container by lazy { AppContainer(this) }
+
+    override fun onCreate() {
+        super.onCreate()
+        container.bleSyncCoordinator.start()
+    }
 }

@@ -2,7 +2,7 @@ package com.meshchat.app.ui.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.meshchat.app.ble.BleMeshManager
+import com.meshchat.app.ble.BleSyncCoordinator
 import com.meshchat.app.data.repository.ConversationRepository
 import com.meshchat.app.data.repository.IdentityRepository
 import com.meshchat.app.domain.BlePayload
@@ -20,7 +20,7 @@ class ChatViewModel(
     private val peerDeviceId: String,
     private val identityRepo: IdentityRepository,
     private val conversationRepo: ConversationRepository,
-    private val bleMeshManager: BleMeshManager
+    private val coordinator: BleSyncCoordinator
 ) : ViewModel() {
 
     val messages: StateFlow<List<Message>> = conversationRepo
@@ -32,64 +32,27 @@ class ChatViewModel(
 
     init {
         viewModelScope.launch { _myDeviceId.value = identityRepo.ensureIdentity().deviceId }
-        observeBleEvents()
-    }
-
-    private fun observeBleEvents() {
-        viewModelScope.launch {
-            bleMeshManager.events.collect { event ->
-                if (event is BleMeshManager.BleEvent.PayloadReceived) {
-                    handleIncomingPayload(event.payload)
-                }
-            }
-        }
-    }
-
-    private suspend fun handleIncomingPayload(payload: BlePayload) {
-        when (payload) {
-            is BlePayload.Message -> {
-                if (conversationRepo.messageExists(payload.id)) return
-                val identity = identityRepo.ensureIdentity()
-                conversationRepo.insertMessage(
-                    conversationId = conversationId,
-                    senderDeviceId = payload.senderDeviceId,
-                    text = payload.text,
-                    status = MessageStatus.SENT,
-                    messageId = payload.id
-                )
-                bleMeshManager.sendAck(payload.id)
-            }
-            is BlePayload.Ack -> {
-                conversationRepo.updateMessageStatus(payload.messageId, MessageStatus.SENT)
-            }
-            is BlePayload.Handshake -> { /* handled in NearbyViewModel */ }
-        }
     }
 
     fun sendMessage(text: String) {
         if (text.isBlank()) return
         viewModelScope.launch {
             val identity = identityRepo.ensureIdentity()
-            // Optimistic insert
             val msg = conversationRepo.insertMessage(
                 conversationId = conversationId,
                 senderDeviceId = identity.deviceId,
                 text = text.take(500),
                 status = MessageStatus.SENDING
             )
-            try {
-                bleMeshManager.sendMessage(
-                    BlePayload.Message(
-                        id = msg.id,
-                        senderDeviceId = identity.deviceId,
-                        text = msg.text,
-                        timestamp = msg.createdAt
-                    )
+            coordinator.sendMessage(
+                msg,
+                BlePayload.Message(
+                    id             = msg.id,
+                    senderDeviceId = identity.deviceId,
+                    text           = msg.text,
+                    timestamp      = msg.createdAt
                 )
-                conversationRepo.updateMessageStatus(msg.id, MessageStatus.SENT)
-            } catch (e: Exception) {
-                conversationRepo.updateMessageStatus(msg.id, MessageStatus.FAILED)
-            }
+            )
         }
     }
 
@@ -99,19 +62,15 @@ class ChatViewModel(
             if (msg.status != MessageStatus.FAILED) return@launch
             conversationRepo.updateMessageStatus(messageId, MessageStatus.SENDING)
             val identity = identityRepo.ensureIdentity()
-            try {
-                bleMeshManager.sendMessage(
-                    BlePayload.Message(
-                        id = msg.id,
-                        senderDeviceId = identity.deviceId,
-                        text = msg.text,
-                        timestamp = msg.createdAt
-                    )
+            coordinator.sendMessage(
+                msg,
+                BlePayload.Message(
+                    id             = msg.id,
+                    senderDeviceId = identity.deviceId,
+                    text           = msg.text,
+                    timestamp      = msg.createdAt
                 )
-                conversationRepo.updateMessageStatus(msg.id, MessageStatus.SENT)
-            } catch (e: Exception) {
-                conversationRepo.updateMessageStatus(msg.id, MessageStatus.FAILED)
-            }
+            )
         }
     }
 }

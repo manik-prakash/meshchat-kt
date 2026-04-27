@@ -10,8 +10,9 @@ data class IdentityEntity(
     @PrimaryKey
     @ColumnInfo(name = "device_id") val deviceId: String,
     @ColumnInfo(name = "display_name") val displayName: String,
-    @ColumnInfo(name = "created_at") val createdAt: Long
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+    @ColumnInfo(name = "has_completed_onboarding", defaultValue = "0") val hasCompletedOnboarding: Boolean
 )
 
-fun IdentityEntity.toDomain() = Identity(deviceId, displayName, createdAt)
-fun Identity.toEntity() = IdentityEntity(deviceId, displayName, createdAt)
+fun IdentityEntity.toDomain() = Identity(deviceId, displayName, createdAt, hasCompletedOnboarding)
+fun Identity.toEntity() = IdentityEntity(deviceId, displayName, createdAt, hasCompletedOnboarding)

@@ -44,11 +44,12 @@ fun ChatScreen(vm: ChatViewModel, peerName: String, onBack: () -> Unit) {
             .fillMaxSize()
             .background(Background)
     ) {
-        // Header
+        // Header — background extends behind status bar, content padded below it
         Row(
             Modifier
                 .fillMaxWidth()
                 .background(Surface)
+                .statusBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {

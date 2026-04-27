@@ -72,6 +72,15 @@ class ConversationRepository(
     suspend fun messageExists(messageId: String): Boolean =
         messageDao.exists(messageId) > 0
 
+    suspend fun getConversationByPeerDeviceId(peerDeviceId: String): Conversation? =
+        conversationDao.getByPeerDeviceId(peerDeviceId)?.toDomain()
+
+    suspend fun getConversationByPeerDisplayName(displayName: String): Conversation? =
+        conversationDao.getByPeerDisplayName(displayName)?.toDomain()
+
+    suspend fun repairPeerIdentity(conversationId: String, newDeviceId: String, newDisplayName: String) =
+        conversationDao.updatePeerIdentity(conversationId, newDeviceId, newDisplayName)
+
     suspend fun upsertPeer(peer: Peer) {
         val existing = peerDao.findByDisplayName(peer.displayName, peer.deviceId)
         if (existing != null) {

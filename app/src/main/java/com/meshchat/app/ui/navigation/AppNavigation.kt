@@ -7,9 +7,11 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.collectAsState
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -30,6 +32,8 @@ import com.meshchat.app.ui.theme.Primary
 import com.meshchat.app.ui.theme.Surface
 import com.meshchat.app.ui.theme.TextMuted
 import com.meshchat.app.ui.theme.TextPrimary
+import com.meshchat.app.ui.viewmodel.BootstrapDest
+import com.meshchat.app.ui.viewmodel.BootstrapViewModel
 import com.meshchat.app.ui.viewmodel.ChatViewModel
 import com.meshchat.app.ui.viewmodel.ConversationsViewModel
 import com.meshchat.app.ui.viewmodel.NearbyViewModel
@@ -39,6 +43,7 @@ import kotlinx.serialization.Serializable
 
 // ── Route definitions ────────────────────────────────────────────────────────
 
+@Serializable object Bootstrap
 @Serializable object Onboarding
 @Serializable object Nearby
 @Serializable object Conversations
@@ -79,7 +84,21 @@ fun AppNavigation() {
     val context = LocalContext.current
     val app = context.applicationContext as MeshChatApplication
 
-    NavHost(navController = navController, startDestination = Onboarding) {
+    NavHost(navController = navController, startDestination = Bootstrap) {
+
+        composable<Bootstrap> {
+            val vm: BootstrapViewModel = viewModel {
+                BootstrapViewModel(app.container.identityRepository)
+            }
+            val dest by vm.dest.collectAsState()
+            LaunchedEffect(dest) {
+                when (dest) {
+                    BootstrapDest.ONBOARDING -> navController.navigate(Onboarding) { popUpTo(Bootstrap) { inclusive = true } }
+                    BootstrapDest.NEARBY     -> navController.navigate(Nearby)     { popUpTo(Bootstrap) { inclusive = true } }
+                    BootstrapDest.PENDING    -> Unit
+                }
+            }
+        }
 
         composable<Onboarding> {
             val vm: OnboardingViewModel = viewModel {
@@ -96,7 +115,7 @@ fun AppNavigation() {
         composable<Nearby> {
             MainScaffold(currentRoute = it.destination, navController = navController) {
                 val vm: NearbyViewModel = viewModel {
-                    NearbyViewModel(app.container.bleMeshManager, app.container.conversationRepository)
+                    NearbyViewModel(app.container.bleMeshManager, app.container.bleSyncCoordinator)
                 }
                 NearbyScreen(vm = vm, onOpenChat = { conv ->
                     navController.navigate(Chat(conv.id, conv.peerDisplayName, conv.peerDeviceId))
@@ -128,11 +147,11 @@ fun AppNavigation() {
             val route = backStackEntry.toRoute<Chat>()
             val vm: ChatViewModel = viewModel {
                 ChatViewModel(
-                    conversationId = route.conversationId,
-                    peerDeviceId   = route.peerDeviceId,
-                    identityRepo   = app.container.identityRepository,
+                    conversationId   = route.conversationId,
+                    peerDeviceId     = route.peerDeviceId,
+                    identityRepo     = app.container.identityRepository,
                     conversationRepo = app.container.conversationRepository,
-                    bleMeshManager = app.container.bleMeshManager
+                    coordinator      = app.container.bleSyncCoordinator
                 )
             }
             ChatScreen(
@@ -150,7 +169,7 @@ fun AppNavigation() {
 private fun MainScaffold(
     currentRoute: androidx.navigation.NavDestination?,
     navController: androidx.navigation.NavController,
-    content: @Composable (Modifier) -> Unit
+    content: @Composable () -> Unit
 ) {
     Scaffold(
         containerColor = Background,
@@ -173,6 +192,8 @@ private fun MainScaffold(
             }
         }
     ) { innerPadding ->
-        content(Modifier.padding(innerPadding))
+        androidx.compose.foundation.layout.Box(modifier = Modifier.padding(innerPadding)) {
+            content()
+        }
     }
 }

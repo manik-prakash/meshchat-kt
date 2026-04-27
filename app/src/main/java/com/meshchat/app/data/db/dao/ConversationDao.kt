@@ -20,4 +20,10 @@ interface ConversationDao {
 
     @Query("UPDATE conversations SET last_message = :text, last_message_at = :timestamp WHERE id = :conversationId")
     suspend fun updateLastMessage(conversationId: String, text: String, timestamp: Long)
+
+    @Query("SELECT * FROM conversations WHERE peer_display_name = :displayName LIMIT 1")
+    suspend fun getByPeerDisplayName(displayName: String): ConversationEntity?
+
+    @Query("UPDATE conversations SET peer_device_id = :deviceId, peer_display_name = :displayName WHERE id = :id")
+    suspend fun updatePeerIdentity(id: String, deviceId: String, displayName: String)
 }

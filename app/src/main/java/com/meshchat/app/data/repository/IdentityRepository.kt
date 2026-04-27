@@ -28,8 +28,16 @@ class IdentityRepository(private val dao: IdentityDao) {
         return identity
     }
 
+    suspend fun getIdentity(): Identity? =
+        cached ?: dao.getIdentity()?.toDomain()?.also { cached = it }
+
     suspend fun updateDisplayName(name: String) {
         dao.updateDisplayName(name)
         cached = cached?.copy(displayName = name)
+    }
+
+    suspend fun completeOnboarding() {
+        dao.markOnboardingComplete()
+        cached = cached?.copy(hasCompletedOnboarding = true)
     }
 }

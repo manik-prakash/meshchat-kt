@@ -31,6 +31,7 @@ class OnboardingViewModel(private val identityRepo: IdentityRepository) : ViewMo
                 identityRepo.updateDisplayName(trimmed)
                 _identity.value = _identity.value?.copy(displayName = trimmed)
             }
+            identityRepo.completeOnboarding()
             _done.value = true
         }
     }

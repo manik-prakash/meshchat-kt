@@ -16,4 +16,7 @@ interface IdentityDao {
 
     @Query("UPDATE identity SET display_name = :name")
     suspend fun updateDisplayName(name: String)
+
+    @Query("UPDATE identity SET has_completed_onboarding = 1")
+    suspend fun markOnboardingComplete()
 }

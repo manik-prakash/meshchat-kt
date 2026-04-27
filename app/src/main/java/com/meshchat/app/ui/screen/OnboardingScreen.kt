@@ -50,6 +50,7 @@ fun OnboardingScreen(vm: OnboardingViewModel, onDone: () -> Unit) {
         modifier = Modifier
             .fillMaxSize()
             .background(Background)
+            .statusBarsPadding()
             .padding(24.dp),
         verticalArrangement = Arrangement.Center
     ) {

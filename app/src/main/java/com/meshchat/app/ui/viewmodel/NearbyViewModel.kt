@@ -3,8 +3,8 @@ package com.meshchat.app.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.meshchat.app.ble.BleMeshManager
+import com.meshchat.app.ble.BleSyncCoordinator
 import com.meshchat.app.ble.BleState
-import com.meshchat.app.data.repository.ConversationRepository
 import com.meshchat.app.domain.Conversation
 import com.meshchat.app.domain.Peer
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,7 +20,7 @@ data class NearbyUiState(
 
 class NearbyViewModel(
     private val bleMeshManager: BleMeshManager,
-    private val conversationRepo: ConversationRepository
+    private val coordinator: BleSyncCoordinator
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(NearbyUiState())
@@ -59,12 +59,10 @@ class NearbyViewModel(
         }
     }
 
-    /** Connect to a peer and return the resulting Conversation, or null on failure. */
+    /** Connect to a peer, wait for their handshake, and return the resolved Conversation. */
     suspend fun connectAndGetConversation(peer: Peer): Conversation? {
         val bleId = peer.bleId ?: return null
-        val ok = bleMeshManager.connectToPeer(bleId)
-        if (!ok) return null
-        return conversationRepo.getOrCreateConversation(peer.deviceId, peer.displayName)
+        return coordinator.connectAndOpen(bleId)
     }
 
     fun stopScan() = bleMeshManager.stopScan()
