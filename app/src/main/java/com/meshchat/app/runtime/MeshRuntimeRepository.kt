@@ -28,6 +28,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 data class MeshRuntimeStatus(
     val meshActive: Boolean = false,
@@ -47,8 +49,10 @@ class MeshRuntimeRepository(
     private val beaconScheduler: BeaconScheduler,
     private val relayQueueWorker: RelayQueueWorker
 ) {
+    private val tagInstance = Integer.toHexString(System.identityHashCode(this))
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val runtimeMutex = Mutex()
 
     private val _runtimeActive = MutableStateFlow(false)
     private val _discoveredPeers = MutableStateFlow<List<Peer>>(emptyList())
@@ -156,40 +160,53 @@ class MeshRuntimeRepository(
     }
 
     fun startRuntime() {
-        if (_runtimeActive.value) return
-        _runtimeActive.value = true
-        bleSyncCoordinator.start()
-        beaconScheduler.start()
-        relayQueueWorker.start()
-        ensureEventCollector()
-        ensureScanLoop()
-        ensureCleanupLoop()
         scope.launch {
-            try {
-                bleMeshManager.startPeripheral()
-                if (!bleMeshManager.isConnected) {
-                    bleMeshManager.startScan()
+            runtimeMutex.withLock {
+                if (_runtimeActive.value) {
+                    Log.d(TAG, "startRuntime skipped instance=$tagInstance already active")
+                    return@withLock
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "Initial mesh runtime start failed: ${e.message}")
+                Log.d(TAG, "startRuntime begin instance=$tagInstance")
+                _runtimeActive.value = true
+                bleSyncCoordinator.start()
+                beaconScheduler.start()
+                relayQueueWorker.start()
+                ensureEventCollector()
+                ensureScanLoop()
+                ensureCleanupLoop()
+                scope.launch {
+                    try {
+                        bleMeshManager.startPeripheral()
+                        if (!bleMeshManager.isConnected) {
+                            bleMeshManager.startScan()
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Initial mesh runtime start failed: ${e.message}")
+                    }
+                }
             }
         }
     }
 
     fun stopRuntime() {
-        if (!_runtimeActive.value) return
-        _runtimeActive.value = false
-        scanLoopJob?.cancel()
-        scanLoopJob = null
-        cleanupJob?.cancel()
-        cleanupJob = null
-        eventJob?.cancel()
-        eventJob = null
-        _discoveredPeers.value = emptyList()
-        beaconScheduler.stop()
-        relayQueueWorker.stop()
-        bleSyncCoordinator.stop()
-        bleMeshManager.stopRuntime()
+        scope.launch {
+            runtimeMutex.withLock {
+                if (!_runtimeActive.value) return@withLock
+                Log.d(TAG, "stopRuntime instance=$tagInstance")
+                _runtimeActive.value = false
+                scanLoopJob?.cancel()
+                scanLoopJob = null
+                cleanupJob?.cancel()
+                cleanupJob = null
+                eventJob?.cancel()
+                eventJob = null
+                _discoveredPeers.value = emptyList()
+                beaconScheduler.stop()
+                relayQueueWorker.stop()
+                bleSyncCoordinator.stop()
+                bleMeshManager.stopRuntime()
+            }
+        }
     }
 
     private fun ensureEventCollector() {

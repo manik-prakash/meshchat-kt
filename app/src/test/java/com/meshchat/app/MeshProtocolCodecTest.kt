@@ -60,21 +60,31 @@ class MeshProtocolCodecTest {
     }
 
     @Test
-    fun `nodeId truncated to 8 chars in handshake`() {
+    fun `handshake preserves full nodeId`() {
         val long = "12345678-abcd-ef01-2345-6789abcdef01"
         val original = BlePayload.Handshake(nodeId = long, displayName = "Bob")
         val chunks = MeshProtocolCodec.encode(original)
         val decoded = reassemble(chunks, "trunc") as BlePayload.Handshake
-        assertEquals(long.take(8), decoded.nodeId)
+        assertEquals(long, decoded.nodeId)
     }
 
     @Test
-    fun `messageId truncated to 12 chars in ack`() {
+    fun `ack preserves full messageId`() {
         val longId = "abcdefghijklmnopqrstuvwxyz"
         val original = BlePayload.Ack(messageId = longId)
         val chunks = MeshProtocolCodec.encode(original)
-        val decoded = MeshProtocolCodec.decode(chunks[0]) as BlePayload.Ack
-        assertEquals(longId.take(12), decoded.messageId)
+        val decoded = reassemble(chunks, "ack_full") as BlePayload.Ack
+        assertEquals(longId, decoded.messageId)
+    }
+
+    @Test
+    fun `message preserves full sender and message IDs`() {
+        val longId = "message-id-that-is-longer-than-twelve"
+        val longSender = "sender-public-key-ish-value-abcdefghijklmnopqrstuvwxyz"
+        val original = BlePayload.Message(id = longId, senderDeviceId = longSender, text = "payload", timestamp = 0L)
+        val decoded = reassemble(MeshProtocolCodec.encode(original), "msg_full_ids") as BlePayload.Message
+        assertEquals(longId, decoded.id)
+        assertEquals(longSender, decoded.senderDeviceId)
     }
 
     // ── Fragment assembly ────────────────────────────────────────────────────
@@ -86,7 +96,7 @@ class MeshProtocolCodecTest {
         val chunks = MeshProtocolCodec.encode(original)
         assertTrue(chunks.size > 2)
         // All chunks except the last should return null
-        for (i in 0 until chunks.size - 1) {
+        for (i in 0 until chunks.lastIndex) {
             val result = MeshProtocolCodec.decode(chunks[i], "frag_test_1")
             assertNull("chunk $i should return null", result)
         }
@@ -96,14 +106,16 @@ class MeshProtocolCodecTest {
 
     @Test
     fun `missing fragment returns null`() {
-        val text = "D".repeat(200)
+        val text = "D".repeat(500)
         val original = BlePayload.Message(id = "id1234567890", senderDeviceId = "sender12", text = text, timestamp = 0L)
         val chunks = MeshProtocolCodec.encode(original)
         assertTrue(chunks.size > 2)
-        // Feed start and end, skip middle
+        // Skip an interior fragment and confirm the final decode still fails.
         MeshProtocolCodec.decode(chunks[0], "missing_test")
-        // skip chunks[1]
-        val last = MeshProtocolCodec.decode(chunks.last(), "missing_test")
+        var last: BlePayload? = null
+        for (i in 2 until chunks.size) {
+            last = MeshProtocolCodec.decode(chunks[i], "missing_test")
+        }
         assertNull("should return null with missing middle fragment", last)
     }
 
@@ -113,21 +125,20 @@ class MeshProtocolCodecTest {
         val original = BlePayload.Message(id = "id1234567890", senderDeviceId = "sender12", text = text, timestamp = 0L)
         val chunks = MeshProtocolCodec.encode(original)
 
-        // Feed key1 start, then key2 start — key1 should still be independent
         MeshProtocolCodec.decode(chunks[0], "key1_iso")
         MeshProtocolCodec.decode(chunks[0], "key2_iso")
+
+        var key1Result: BlePayload? = null
         for (i in 1 until chunks.size) {
-            MeshProtocolCodec.decode(chunks[i], "key1_iso")
+            key1Result = MeshProtocolCodec.decode(chunks[i], "key1_iso")
         }
-        val result = MeshProtocolCodec.decode(chunks.last(), "key2_iso")
-        // key2 should also complete independently when fed all chunks
-        // (they're separate reassembly buffers)
-        // reset key2 by feeding from start again
-        MeshProtocolCodec.decode(chunks[0], "key3_iso")
+        assertNotNull(key1Result)
+
+        var key2Result: BlePayload? = null
         for (i in 1 until chunks.size) {
-            val r = MeshProtocolCodec.decode(chunks[i], "key3_iso")
-            if (i == chunks.size - 1) assertNotNull(r)
+            key2Result = MeshProtocolCodec.decode(chunks[i], "key2_iso")
         }
+        assertNotNull(key2Result)
     }
 
     @Test

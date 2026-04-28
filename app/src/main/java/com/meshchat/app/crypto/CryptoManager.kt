@@ -85,16 +85,46 @@ class CryptoManager {
     // ── Typed signing helpers ─────────────────────────────────────────────────
 
     fun signRoutedMessage(
-        packetId: String, sourcePublicKey: String, destinationPublicKey: String,
-        timestamp: Long, body: String
-    ): String = sign(routedMessageBytes(packetId, sourcePublicKey, destinationPublicKey, timestamp, body))
+        packetId: String,
+        sourcePublicKey: String,
+        sourceDisplayName: String,
+        destinationPublicKey: String,
+        destinationDisplayName: String,
+        timestamp: Long,
+        body: String
+    ): String = sign(
+        routedMessageBytes(
+            packetId,
+            sourcePublicKey,
+            sourceDisplayName,
+            destinationPublicKey,
+            destinationDisplayName,
+            timestamp,
+            body
+        )
+    )
 
     fun verifyRoutedMessage(
-        peerPublicKeyBase64: String, packetId: String, sourcePublicKey: String,
-        destinationPublicKey: String, timestamp: Long, body: String, signatureBase64: String
+        peerPublicKeyBase64: String,
+        packetId: String,
+        sourcePublicKey: String,
+        sourceDisplayName: String,
+        destinationPublicKey: String,
+        destinationDisplayName: String,
+        timestamp: Long,
+        body: String,
+        signatureBase64: String
     ): Boolean = verify(
         peerPublicKeyBase64,
-        routedMessageBytes(packetId, sourcePublicKey, destinationPublicKey, timestamp, body),
+        routedMessageBytes(
+            packetId,
+            sourcePublicKey,
+            sourceDisplayName,
+            destinationPublicKey,
+            destinationDisplayName,
+            timestamp,
+            body
+        ),
         signatureBase64
     )
 
@@ -132,11 +162,19 @@ class CryptoManager {
     // ── Canonical byte sequences (what gets signed) ───────────────────────────
 
     private fun routedMessageBytes(
-        packetId: String, srcKey: String, dstKey: String, timestamp: Long, body: String
+        packetId: String,
+        srcKey: String,
+        srcDisplayName: String,
+        dstKey: String,
+        dstDisplayName: String,
+        timestamp: Long,
+        body: String
     ): ByteArray = ByteArrayOutputStream().run {
         write(packetId.toByteArray())
         write(srcKey.toByteArray())
+        write(srcDisplayName.toByteArray())
         write(dstKey.toByteArray())
+        write(dstDisplayName.toByteArray())
         writeLongBE(timestamp)
         write(body.toByteArray())
         toByteArray()

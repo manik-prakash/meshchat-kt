@@ -17,11 +17,13 @@ import com.meshchat.app.runtime.MeshRuntimeRepository
 import com.meshchat.app.routing.MeshRouter
 import com.meshchat.app.routing.MeshRouterImpl
 import com.meshchat.app.routing.RelayQueueWorker
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 
 class AppContainer(app: Application) {
+    private val tag = "AppContainer"
     val crypto             = CryptoManager()
     val db                 = AppDatabase.getInstance(app)
     val identityRepository = IdentityRepository(db.identityDao(), crypto)
@@ -38,8 +40,13 @@ class AppContainer(app: Application) {
 
     /** Delivers a routed message addressed to this node: persists to DB + sends DeliveryAck. */
     private val deliverLocally: suspend (BlePayload.RoutedMessage) -> Unit = { packet ->
+        Log.d(
+            tag,
+            "Deliver locally packet=${packet.packetId.takeLast(8)} src=${packet.sourcePublicKey.take(12)} " +
+                "srcName=${packet.sourceDisplayNameSnapshot}"
+        )
         val conv = conversationRepository.getOrCreateConversation(
-            packet.sourcePublicKey, packet.destinationDisplayNameSnapshot
+            packet.sourcePublicKey, packet.sourceDisplayNameSnapshot
         )
         if (!conversationRepository.messageExists(packet.packetId)) {
             conversationRepository.insertMessage(
@@ -54,6 +61,7 @@ class AppContainer(app: Application) {
         val now      = System.currentTimeMillis()
         val sig      = crypto.signDeliveryAck(packet.packetId, identity.publicKey, now)
         val ack      = BlePayload.DeliveryAck(packet.packetId, identity.publicKey, now, sig)
+        Log.d(tag, "Emit DeliveryAck packet=${packet.packetId.takeLast(8)} from=${identity.publicKey.take(12)}")
         // Use the bidirectional broadcast so the ACK reaches the sender regardless of
         // which device initiated the BLE connection (central vs peripheral role).
         bleMeshManager.broadcastDeliveryAck(ack)
@@ -65,9 +73,10 @@ class AppContainer(app: Application) {
         meshRepository     = meshRepository,
         crypto             = crypto,
         locationProvider   = locationProvider,
-        forwardPacket      = { packet  -> bleMeshManager.broadcastRoutedMessage(packet) },
+        forwardPacket      = { packet, bleAddress -> bleMeshManager.sendRoutedMessageTo(packet, bleAddress) },
         deliverLocally     = deliverLocally,
         reportFailure      = { failure -> bleMeshManager.broadcastRouteFailure(failure) },
+        canReachBleAddress = bleMeshManager::canReachBleAddress,
         onQueuedForwarded  = { packetId ->
             conversationRepository.updateMessageStatus(packetId, MessageStatus.FORWARDED)
         }

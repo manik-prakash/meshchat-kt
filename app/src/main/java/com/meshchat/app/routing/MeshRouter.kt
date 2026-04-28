@@ -54,10 +54,11 @@ class MeshRouterImpl(
     private val meshRepository: MeshRepository,
     private val crypto: CryptoManager,
     private val locationProvider: LocationProvider,
-    private val forwardPacket: suspend (packet: BlePayload.RoutedMessage) -> Unit,
+    private val forwardPacket: suspend (packet: BlePayload.RoutedMessage, bleAddress: String) -> Boolean,
     private val deliverLocally: suspend (packet: BlePayload.RoutedMessage) -> Unit,
     private val reportFailure: suspend (failure: BlePayload.RouteFailure) -> Unit = {},
     private val onQueuedForwarded: suspend (packetId: String) -> Unit = {},
+    private val canReachBleAddress: (bleAddress: String?) -> Boolean = { false },
 ) : MeshRouter {
 
     private val TAG = "MeshRouter"
@@ -75,12 +76,22 @@ class MeshRouterImpl(
         text: String,
         timestamp: Long
     ): RoutingDecision {
-        val self    = selfId()
-        val geoHint = meshRepository.getContact(destinationId)?.lastResolvedGeoHash ?: ""
-        val sig     = crypto.signRoutedMessage(packetId, self, destinationId, timestamp, text)
+        val identity = identityRepo.ensureIdentity()
+        val self     = identity.publicKey
+        val geoHint  = meshRepository.getContact(destinationId)?.lastResolvedGeoHash ?: ""
+        val sig      = crypto.signRoutedMessage(
+            packetId = packetId,
+            sourcePublicKey = self,
+            sourceDisplayName = identity.displayName,
+            destinationPublicKey = destinationId,
+            destinationDisplayName = destinationDisplayName,
+            timestamp = timestamp,
+            body = text
+        )
         val packet  = BlePayload.RoutedMessage(
             packetId = packetId,
             sourcePublicKey = self,
+            sourceDisplayNameSnapshot = identity.displayName,
             destinationPublicKey = destinationId,
             destinationDisplayNameSnapshot = destinationDisplayName,
             destinationGeoHint = geoHint,
@@ -100,6 +111,11 @@ class MeshRouterImpl(
             DEFAULT_TTL, RoutingMode.GREEDY
         )
         meshRepository.logRouteEvent(packetId, RouteAction.ORIGINATED)
+        Log.d(
+            TAG,
+            "Originate packet=${packetId.takeLast(8)} dst=${destinationId.take(12)} " +
+                "geo=${if (geoHint.isBlank()) "none" else geoHint} ttl=$DEFAULT_TTL"
+        )
 
         return attemptForward(packet)
     }
@@ -113,8 +129,14 @@ class MeshRouterImpl(
             }
             val sigValid = crypto.verifyRoutedMessage(
                 packet.sourcePublicKey,
-                packet.packetId, packet.sourcePublicKey, packet.destinationPublicKey,
-                packet.timestamp, packet.body, packet.signature
+                packet.packetId,
+                packet.sourcePublicKey,
+                packet.sourceDisplayNameSnapshot,
+                packet.destinationPublicKey,
+                packet.destinationDisplayNameSnapshot,
+                packet.timestamp,
+                packet.body,
+                packet.signature
             )
             if (!sigValid) {
                 Log.w(TAG, "Invalid sig on ${packet.packetId} from ${packet.sourcePublicKey.take(16)}")
@@ -145,6 +167,7 @@ class MeshRouterImpl(
 
             val self = selfId()
             if (packet.destinationPublicKey == self) {
+                Log.d(TAG, "Packet ${packet.packetId.takeLast(8)} reached destination self")
                 meshRepository.logRouteEvent(packet.packetId, RouteAction.DELIVERED)
                 deliverLocally(packet)
             } else {
@@ -230,10 +253,27 @@ class MeshRouterImpl(
 
     private suspend fun attemptForward(packet: BlePayload.RoutedMessage): RoutingDecision {
         // Fast path: destination is a directly-connected BLE neighbor right now.
-        if (meshRepository.getNeighborByPublicKey(packet.destinationPublicKey) != null) {
+        val directNeighbor = meshRepository.getNeighborByPublicKey(packet.destinationPublicKey)
+        if (directNeighbor != null && isNeighborReachable(directNeighbor)) {
             val outPacket = packet.copy(routingMode = RoutingMode.GREEDY, voidHopCount = 0)
             meshRepository.markRelayInFlight(packet.packetId)
-            forwardPacket(outPacket)
+            try {
+                Log.d(
+                    TAG,
+                    "Direct forward packet=${packet.packetId.takeLast(8)} ble=${directNeighbor.bleAddress} " +
+                        "dst=${packet.destinationPublicKey.take(12)}"
+                )
+                val forwarded = forwardPacket(outPacket, directNeighbor.bleAddress ?: "")
+                if (!forwarded) {
+                    Log.d(TAG, "Direct forward failed packet=${packet.packetId.takeLast(8)} ble=${directNeighbor.bleAddress}")
+                    meshRepository.resetRelayPacket(packet.packetId)
+                    return RoutingDecision.QUEUED
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "forwardPacket failed for ${packet.packetId.take(16)}: ${e.message}")
+                meshRepository.resetRelayPacket(packet.packetId)
+                return RoutingDecision.QUEUED
+            }
             meshRepository.logRouteEvent(packet.packetId, RouteAction.FORWARDED,
                 chosenNextHop = packet.destinationPublicKey,
                 reason = "direct")
@@ -244,7 +284,23 @@ class MeshRouterImpl(
             is ForwardDecision.GreedyHop -> {
                 val outPacket = packet.copy(routingMode = RoutingMode.GREEDY, voidHopCount = 0)
                 meshRepository.markRelayInFlight(packet.packetId)
-                forwardPacket(outPacket)
+                try {
+                    Log.d(
+                        TAG,
+                        "Greedy forward packet=${packet.packetId.takeLast(8)} next=${fd.hop.neighborPublicKey.take(12)} " +
+                            "ble=${fd.hop.bleAddress}"
+                    )
+                    val forwarded = forwardPacket(outPacket, fd.hop.bleAddress ?: "")
+                    if (!forwarded) {
+                        Log.d(TAG, "Greedy forward failed packet=${packet.packetId.takeLast(8)} ble=${fd.hop.bleAddress}")
+                        meshRepository.resetRelayPacket(packet.packetId)
+                        return RoutingDecision.QUEUED
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "forwardPacket failed for ${packet.packetId.take(16)}: ${e.message}")
+                    meshRepository.resetRelayPacket(packet.packetId)
+                    return RoutingDecision.QUEUED
+                }
                 meshRepository.logRouteEvent(
                     packet.packetId, RouteAction.FORWARDED,
                     chosenNextHop = fd.hop.neighborPublicKey,
@@ -260,7 +316,23 @@ class MeshRouterImpl(
                     voidHopCount = newVoidCount
                 )
                 meshRepository.markRelayInFlight(packet.packetId)
-                forwardPacket(outPacket)
+                try {
+                    Log.d(
+                        TAG,
+                        "Perimeter forward packet=${packet.packetId.takeLast(8)} next=${fd.hop.neighborPublicKey.take(12)} " +
+                            "ble=${fd.hop.bleAddress} void=${newVoidCount}"
+                    )
+                    val forwarded = forwardPacket(outPacket, fd.hop.bleAddress ?: "")
+                    if (!forwarded) {
+                        Log.d(TAG, "Perimeter forward failed packet=${packet.packetId.takeLast(8)} ble=${fd.hop.bleAddress}")
+                        meshRepository.resetRelayPacket(packet.packetId)
+                        return RoutingDecision.QUEUED
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "forwardPacket failed for ${packet.packetId.take(16)}: ${e.message}")
+                    meshRepository.resetRelayPacket(packet.packetId)
+                    return RoutingDecision.QUEUED
+                }
                 meshRepository.logRouteEvent(
                     packet.packetId, RouteAction.PERIMETER_HOP,
                     chosenNextHop = fd.hop.neighborPublicKey,
@@ -306,7 +378,7 @@ class MeshRouterImpl(
     private suspend fun selectForward(packet: BlePayload.RoutedMessage): ForwardDecision {
         val candidates = meshRepository
             .getRecentNeighbors(MeshRepository.NEIGHBOR_STALE_MS)
-            .filter { it.relayCapable && it.lat != null && it.lon != null }
+            .filter { it.relayCapable && it.lat != null && it.lon != null && isNeighborReachable(it) }
 
         if (candidates.isEmpty()) return ForwardDecision.NoRoutableNeighbors
 
@@ -355,6 +427,9 @@ class MeshRouterImpl(
                    cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * sin(dLon / 2).pow(2)
         return EARTH_RADIUS_KM * 2 * atan2(sqrt(a), sqrt(1 - a))
     }
+
+    private fun isNeighborReachable(neighbor: NeighborEntity): Boolean =
+        canReachBleAddress(neighbor.bleAddress)
 
     companion object {
         const val DEFAULT_TTL = 7

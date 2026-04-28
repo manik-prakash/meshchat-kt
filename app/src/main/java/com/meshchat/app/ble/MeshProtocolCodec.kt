@@ -65,9 +65,9 @@ object MeshProtocolCodec {
 
     // ── Encoding ────────────────────────────────────────────────────────────
 
-    fun encode(payload: BlePayload): List<ByteArray> {
+    fun encode(payload: BlePayload, chunkSize: Int = CHUNK_SIZE): List<ByteArray> {
         val bytes = serialize(payload)
-        return if (bytes.size <= CHUNK_SIZE) listOf(bytes) else fragment(bytes)
+        return if (bytes.size <= chunkSize) listOf(bytes) else fragment(bytes, chunkSize)
     }
 
     /** Serialize a payload to a Base64 string for persistent storage (relay queue). */
@@ -91,8 +91,8 @@ object MeshProtocolCodec {
                 out.write(pkBytes)
             }
             is BlePayload.Message -> {
-                val idBytes     = payload.id.take(12).toByteArray(Charsets.UTF_8)
-                val senderBytes = payload.senderDeviceId.take(8).toByteArray(Charsets.UTF_8)
+                val idBytes     = payload.id.toByteArray(Charsets.UTF_8)
+                val senderBytes = payload.senderDeviceId.toByteArray(Charsets.UTF_8)
                 val textBytes   = payload.text.toByteArray(Charsets.UTF_8)
                 out.write(TYPE_MESSAGE.toInt())
                 out.write(idBytes.size)
@@ -102,7 +102,7 @@ object MeshProtocolCodec {
                 out.write(textBytes)
             }
             is BlePayload.Ack -> {
-                val idBytes = payload.messageId.take(12).toByteArray(Charsets.UTF_8)
+                val idBytes = payload.messageId.toByteArray(Charsets.UTF_8)
                 out.write(TYPE_ACK.toInt())
                 out.write(idBytes.size)
                 out.write(idBytes)
@@ -123,6 +123,7 @@ object MeshProtocolCodec {
                 out.write(TYPE_ROUTED_MSG.toInt())
                 out.writeStr1(payload.packetId)
                 out.writeStr1(payload.sourcePublicKey)
+                out.writeStr1(payload.sourceDisplayNameSnapshot)
                 out.writeStr1(payload.destinationPublicKey)
                 out.writeStr1(payload.destinationDisplayNameSnapshot)
                 out.writeStr1(payload.destinationGeoHint)
@@ -159,12 +160,14 @@ object MeshProtocolCodec {
         return out.toByteArray()
     }
 
-    private fun fragment(bytes: ByteArray): List<ByteArray> {
+    private fun fragment(bytes: ByteArray, chunkSize: Int = CHUNK_SIZE): List<ByteArray> {
+        val firstDataSize = chunkSize - 4  // type + totalLen(2) + seqTotal
+        val contDataSize  = chunkSize - 2  // type + seqNum
         val windows = mutableListOf<ByteArray>()
-        windows.add(bytes.copyOfRange(0, minOf(FIRST_DATA_SIZE, bytes.size)))
+        windows.add(bytes.copyOfRange(0, minOf(firstDataSize, bytes.size)))
         var pos = windows[0].size
         while (pos < bytes.size) {
-            val end = minOf(pos + CONT_DATA_SIZE, bytes.size)
+            val end = minOf(pos + contDataSize, bytes.size)
             windows.add(bytes.copyOfRange(pos, end))
             pos = end
         }
@@ -224,7 +227,7 @@ object MeshProtocolCodec {
             TYPE_FRAG_END -> {
                 val seqNum = data[1].toInt() and 0xFF
                 val buf = reassemblyBuffers.remove(sourceKey) ?: run {
-                    Log.w(TAG, "Fragment end without start for $sourceKey")
+                    logWarn("Fragment end without start for $sourceKey")
                     return null
                 }
                 buf.chunks[seqNum] = data.copyOfRange(2, data.size)
@@ -232,7 +235,7 @@ object MeshProtocolCodec {
                 val assembled = ByteArrayOutputStream()
                 for (i in 0 until buf.seqTotal) {
                     val chunk = buf.chunks[i] ?: run {
-                        Log.w(TAG, "Missing fragment $i for $sourceKey")
+                        logWarn("Missing fragment $i for $sourceKey")
                         return null
                     }
                     assembled.write(chunk)
@@ -289,19 +292,21 @@ object MeshProtocolCodec {
             TYPE_ROUTED_MSG -> {
                 val (packetId, o1)  = bytes.readStr1(off)
                 val (srcKey, o2)    = bytes.readStr1(o1)
-                val (dstKey, o3)    = bytes.readStr1(o2)
-                val (dstName, o4)   = bytes.readStr1(o3)
-                val (geoHint, o5)   = bytes.readStr1(o4)
-                val ttl             = bytes[o5].toInt() and 0xFF
-                val hopCount        = bytes[o5 + 1].toInt() and 0xFF
-                val voidHopCount    = bytes[o5 + 2].toInt() and 0xFF
-                val routingMode     = RoutingMode.fromId(bytes[o5 + 3])
-                val timestamp       = bytes.readLongBE(o5 + 4)
-                val (sig, o6)       = bytes.readStr1(o5 + 12)
-                val (body, _)       = bytes.readStr2(o6)
+                val (srcName, o3)   = bytes.readStr1(o2)
+                val (dstKey, o4)    = bytes.readStr1(o3)
+                val (dstName, o5)   = bytes.readStr1(o4)
+                val (geoHint, o6)   = bytes.readStr1(o5)
+                val ttl             = bytes[o6].toInt() and 0xFF
+                val hopCount        = bytes[o6 + 1].toInt() and 0xFF
+                val voidHopCount    = bytes[o6 + 2].toInt() and 0xFF
+                val routingMode     = RoutingMode.fromId(bytes[o6 + 3])
+                val timestamp       = bytes.readLongBE(o6 + 4)
+                val (sig, o7)       = bytes.readStr1(o6 + 12)
+                val (body, _)       = bytes.readStr2(o7)
                 BlePayload.RoutedMessage(
                     packetId = packetId,
                     sourcePublicKey = srcKey,
+                    sourceDisplayNameSnapshot = srcName,
                     destinationPublicKey = dstKey,
                     destinationDisplayNameSnapshot = dstName,
                     destinationGeoHint = geoHint,
@@ -394,4 +399,12 @@ object MeshProtocolCodec {
 
     private fun ByteArray.readDoubleBE(off: Int): Double =
         java.lang.Double.longBitsToDouble(readLongBE(off))
+
+    private fun logWarn(message: String) {
+        try {
+            Log.w(TAG, message)
+        } catch (_: RuntimeException) {
+            // Local JVM tests do not provide android.util.Log.
+        }
+    }
 }

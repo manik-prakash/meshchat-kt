@@ -15,10 +15,14 @@ import com.meshchat.app.ble.BleConstants.CCCD_UUID
 import com.meshchat.app.ble.BleConstants.HANDSHAKE_CHAR_UUID
 import com.meshchat.app.ble.BleConstants.MESSAGE_CHAR_UUID
 import com.meshchat.app.ble.BleConstants.SERVICE_UUID
+import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 import java.io.ByteArrayOutputStream
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -34,6 +38,7 @@ import kotlin.coroutines.resume
 class GattServerManager(private val context: Context) {
 
     private val TAG = "GattServer"
+    private val instanceTag = Integer.toHexString(System.identityHashCode(this))
 
     sealed class Event {
         data class DeviceConnected(val device: BluetoothDevice) : Event()
@@ -48,6 +53,7 @@ class GattServerManager(private val context: Context) {
     private var advertiser: BluetoothLeAdvertiser? = null
     private var advertising = false
     private var advertiseCallback: AdvertiseCallback? = null
+    private val serverLifecycleMutex = Mutex()
 
     private val connectedDevices = mutableSetOf<BluetoothDevice>()
     val connectedDeviceCount: Int get() = connectedDevices.size
@@ -56,6 +62,11 @@ class GattServerManager(private val context: Context) {
 
     // Buffers for BLE "prepared writes" (long writes split by the client stack)
     private val preparedWriteBuffers = ConcurrentHashMap<String, ConcurrentHashMap<String, ByteArrayOutputStream>>()
+
+    // Per-device pending continuation resumed by onNotificationSent.
+    private val pendingNotifConts = ConcurrentHashMap<String, CancellableContinuation<Boolean>>()
+    // Serializes fragment sends so concurrent callers never interleave fragments on the same characteristic.
+    private val notifMutex = Mutex()
 
     private val _events = MutableSharedFlow<Event>(
         replay = 0, extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST
@@ -147,38 +158,46 @@ class GattServerManager(private val context: Context) {
 
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
             Log.d(TAG, "Notification sent to ${device.address}, status=$status")
+            pendingNotifConts.remove(device.address)?.resume(status == BluetoothGatt.GATT_SUCCESS)
         }
     }
 
     // ── Public API ──────────────────────────────────────────────────────────
 
-    fun startServer() {
-        if (gattServer != null) return
+    suspend fun startServer() {
+        serverLifecycleMutex.withLock {
+            if (gattServer != null) {
+                Log.d(TAG, "startServer skipped instance=$instanceTag already started")
+                return
+            }
 
-        val service = BluetoothGattService(UUID.fromString(SERVICE_UUID), BluetoothGattService.SERVICE_TYPE_PRIMARY)
+            Log.d(TAG, "startServer instance=$instanceTag opening GATT server")
 
-        for (charUUID in listOf(HANDSHAKE_CHAR_UUID, MESSAGE_CHAR_UUID, ACK_CHAR_UUID)) {
-            val char = BluetoothGattCharacteristic(
-                UUID.fromString(charUUID),
-                BluetoothGattCharacteristic.PROPERTY_READ or
-                    BluetoothGattCharacteristic.PROPERTY_WRITE or
-                    BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or
-                    BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-                BluetoothGattCharacteristic.PERMISSION_READ or
-                    BluetoothGattCharacteristic.PERMISSION_WRITE
-            )
-            val cccd = BluetoothGattDescriptor(
-                UUID.fromString(CCCD_UUID),
-                BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
-            )
-            char.addDescriptor(cccd)
-            service.addCharacteristic(char)
-            characteristics[charUUID.lowercase()] = char
+            val service = BluetoothGattService(UUID.fromString(SERVICE_UUID), BluetoothGattService.SERVICE_TYPE_PRIMARY)
+
+            for (charUUID in listOf(HANDSHAKE_CHAR_UUID, MESSAGE_CHAR_UUID, ACK_CHAR_UUID)) {
+                val char = BluetoothGattCharacteristic(
+                    UUID.fromString(charUUID),
+                    BluetoothGattCharacteristic.PROPERTY_READ or
+                        BluetoothGattCharacteristic.PROPERTY_WRITE or
+                        BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or
+                        BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+                    BluetoothGattCharacteristic.PERMISSION_READ or
+                        BluetoothGattCharacteristic.PERMISSION_WRITE
+                )
+                val cccd = BluetoothGattDescriptor(
+                    UUID.fromString(CCCD_UUID),
+                    BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
+                )
+                char.addDescriptor(cccd)
+                service.addCharacteristic(char)
+                characteristics[charUUID.lowercase()] = char
+            }
+
+            gattServer = bluetoothManager.openGattServer(context, gattCallback)
+            gattServer?.addService(service)
+            Log.i(TAG, "GATT server started instance=$instanceTag")
         }
-
-        gattServer = bluetoothManager.openGattServer(context, gattCallback)
-        gattServer?.addService(service)
-        Log.i(TAG, "GATT server started")
     }
 
     suspend fun startAdvertising(deviceName: String): Boolean {
@@ -225,26 +244,65 @@ class GattServerManager(private val context: Context) {
     }
 
     /**
-     * Notify all connected centrals on the given characteristic.
-     * On API 33+ the value is passed directly; on older APIs it is written to
-     * characteristic.value first (the only overload available pre-33).
+     * Notify all connected centrals on the given characteristic, waiting for each
+     * [onNotificationSent] callback before proceeding to the next device.
+     *
+     * The [notifMutex] prevents concurrent callers from interleaving fragments on the
+     * same characteristic — Android's peripheral notification queue holds only 1–3
+     * entries, so any fire-and-forget loop will silently drop fragments.
      */
     @Suppress("DEPRECATION")
-    fun sendNotification(charUUID: String, value: ByteArray) {
+    suspend fun sendNotification(charUUID: String, value: ByteArray) {
         val char = characteristics[charUUID.lowercase()] ?: return
-        for (device in connectedDevices.toList()) {
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    gattServer?.notifyCharacteristicChanged(device, char, false, value)
-                } else {
-                    char.value = value
-                    gattServer?.notifyCharacteristicChanged(device, char, false)
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Notify failed for ${device.address}: ${e.message}")
+        notifMutex.withLock {
+            for (device in connectedDevices.toList()) {
+                sendNotificationLocked(device, char, value)
             }
         }
     }
+
+    @Suppress("DEPRECATION")
+    suspend fun sendNotificationTo(deviceAddress: String, charUUID: String, value: ByteArray): Boolean {
+        val char = characteristics[charUUID.lowercase()] ?: return false
+        val device = connectedDevices.firstOrNull { it.address == deviceAddress } ?: return false
+        return notifMutex.withLock {
+            sendNotificationLocked(device, char, value)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private suspend fun sendNotificationLocked(
+        device: BluetoothDevice,
+        char: BluetoothGattCharacteristic,
+        value: ByteArray
+    ): Boolean {
+        return try {
+            withTimeout(2_000) {
+                suspendCancellableCoroutine<Boolean> { cont ->
+                    pendingNotifConts[device.address] = cont
+                    cont.invokeOnCancellation { pendingNotifConts.remove(device.address) }
+                    val dispatched = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        @Suppress("NewApi")
+                        gattServer?.notifyCharacteristicChanged(device, char, false, value) == 0
+                    } else {
+                        char.value = value
+                        gattServer?.notifyCharacteristicChanged(device, char, false) == true
+                    }
+                    if (!dispatched) {
+                        pendingNotifConts.remove(device.address)
+                        cont.resume(false)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            pendingNotifConts.remove(device.address)
+            Log.w(TAG, "Notify failed for ${device.address}: ${e.message}")
+            false
+        }
+    }
+
+    fun isConnectedTo(deviceAddress: String): Boolean =
+        connectedDevices.any { it.address == deviceAddress }
 
     fun stop() {
         try { advertiseCallback?.let { advertiser?.stopAdvertising(it) } } catch (_: Exception) {}
@@ -256,6 +314,6 @@ class GattServerManager(private val context: Context) {
         connectedDevices.clear()
         characteristics.clear()
         preparedWriteBuffers.clear()
-        Log.i(TAG, "GATT server stopped")
+        Log.i(TAG, "GATT server stopped instance=$instanceTag")
     }
 }

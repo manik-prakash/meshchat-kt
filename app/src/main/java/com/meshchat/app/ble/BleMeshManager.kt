@@ -33,6 +33,8 @@ import kotlin.coroutines.Continuation
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 enum class BleState { IDLE, SCANNING, CONNECTING, CONNECTED, ERROR }
 
@@ -49,6 +51,7 @@ class BleMeshManager(
     private val conversationRepo: ConversationRepository
 ) {
     private val TAG = "BleMesh"
+    private val instanceTag = Integer.toHexString(System.identityHashCode(this))
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -74,9 +77,15 @@ class BleMeshManager(
     private var connectedGatt: BluetoothGatt? = null
     private var scanJob: Job? = null
     private var peripheralStarted = false
+    private var peripheralStarting = false
 
     // Per-device dedup: name -> last-seen timestamp
     private val discoveredNames = mutableMapOf<String, Long>()
+
+    // MTU negotiated with the remote peripheral (set in onMtuChanged; default safe minimum).
+    @Volatile private var negotiatedMtu: Int = 23
+    // BLE payload = MTU - 3 ATT overhead; coerced to [20, 509] to stay within BLE spec.
+    private val chunkSize get() = (negotiatedMtu - 3).coerceIn(20, 509)
 
     // Pending coroutine continuations for sequential GATT operations
     private var pendingConnectionCont: Continuation<BluetoothGatt>? = null
@@ -84,7 +93,9 @@ class BleMeshManager(
     private var pendingServicesCont: Continuation<Boolean>? = null
     private var pendingDescWriteCont: Continuation<Boolean>? = null
     private var pendingCharWriteCont: Continuation<Boolean>? = null
-    private val gattWriteMutex = kotlinx.coroutines.sync.Mutex()
+    private val gattWriteMutex = Mutex()
+    private val peripheralMutex = Mutex()
+    private val scanMutex = Mutex()
 
     // ── GATT Client Callback ────────────────────────────────────────────────
 
@@ -111,6 +122,7 @@ class BleMeshManager(
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
             Log.i(TAG, "MTU changed to $mtu")
+            if (status == BluetoothGatt.GATT_SUCCESS) negotiatedMtu = mtu
             pendingMtuCont?.also { pendingMtuCont = null; it.resume(mtu) }
         }
 
@@ -175,6 +187,7 @@ class BleMeshManager(
     // ── Init ────────────────────────────────────────────────────────────────
 
     init {
+        Log.d(TAG, "init instance=$instanceTag")
         scope.launch { observeServerEvents() }
     }
 
@@ -205,14 +218,25 @@ class BleMeshManager(
     // ── Peripheral ──────────────────────────────────────────────────────────
 
     suspend fun startPeripheral() {
-        if (peripheralStarted) return
-        val identity = identityRepo.ensureIdentity()
-        val advName = "$PEER_NAME_PREFIX${identity.displayName.take(BleConstants.ADV_NAME_MAX_LEN)}"
+        peripheralMutex.withLock {
+            if (peripheralStarted || peripheralStarting) {
+                Log.d(TAG, "startPeripheral skipped instance=$instanceTag started=$peripheralStarted starting=$peripheralStarting")
+                return
+            }
+            peripheralStarting = true
+            try {
+                val identity = identityRepo.ensureIdentity()
+                val advName = "$PEER_NAME_PREFIX${identity.displayName.take(BleConstants.ADV_NAME_MAX_LEN)}"
 
-        gattServer.startServer()
-        val ok = gattServer.startAdvertising(advName)
-        peripheralStarted = ok
-        Log.i(TAG, if (ok) "Peripheral started as $advName" else "Peripheral advertising FAILED")
+                Log.d(TAG, "startPeripheral begin instance=$instanceTag advName=$advName")
+                gattServer.startServer()
+                val ok = gattServer.startAdvertising(advName)
+                peripheralStarted = ok
+                Log.i(TAG, if (ok) "Peripheral started as $advName instance=$instanceTag" else "Peripheral advertising FAILED instance=$instanceTag")
+            } finally {
+                peripheralStarting = false
+            }
+        }
     }
 
     // ── Scan ────────────────────────────────────────────────────────────────
@@ -220,40 +244,46 @@ class BleMeshManager(
     private var activeScanCallback: ScanCallback? = null
 
     suspend fun startScan(durationMs: Long = SCAN_DURATION_MS) {
-        if (_state.value == BleState.SCANNING) return
-
-        startPeripheral()
-
-        val scanner = adapter.bluetoothLeScanner ?: run {
-            _state.value = BleState.ERROR
-            return
-        }
-
-        discoveredNames.clear()
-        _state.value = BleState.SCANNING
-
-        val callback = object : ScanCallback() {
-            override fun onScanResult(callbackType: Int, result: ScanResult) {
-                val name = result.scanRecord?.deviceName ?: result.device.name ?: return
-                if (!name.startsWith(PEER_NAME_PREFIX)) return
-                handleDiscoveredDevice(result.device, name, result.rssi)
+        scanMutex.withLock {
+            if (_state.value == BleState.SCANNING) {
+                Log.d(TAG, "startScan skipped instance=$instanceTag already scanning")
+                return
             }
-            override fun onScanFailed(errorCode: Int) {
-                Log.e(TAG, "Scan failed: $errorCode")
+
+            startPeripheral()
+
+            val scanner = adapter.bluetoothLeScanner ?: run {
                 _state.value = BleState.ERROR
+                return
             }
-        }
-        activeScanCallback = callback
 
-        scanner.startScan(
-            null,
-            ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(),
-            callback
-        )
+            discoveredNames.clear()
+            _state.value = BleState.SCANNING
+            Log.d(TAG, "startScan begin instance=$instanceTag durationMs=$durationMs")
 
-        scanJob = scope.launch {
-            delay(durationMs)
-            stopScan()
+            val callback = object : ScanCallback() {
+                override fun onScanResult(callbackType: Int, result: ScanResult) {
+                    val name = result.scanRecord?.deviceName ?: result.device.name ?: return
+                    if (!name.startsWith(PEER_NAME_PREFIX)) return
+                    handleDiscoveredDevice(result.device, name, result.rssi)
+                }
+                override fun onScanFailed(errorCode: Int) {
+                    Log.e(TAG, "Scan failed: $errorCode")
+                    _state.value = BleState.ERROR
+                }
+            }
+            activeScanCallback = callback
+
+            scanner.startScan(
+                null,
+                ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(),
+                callback
+            )
+
+            scanJob = scope.launch {
+                delay(durationMs)
+                stopScan()
+            }
         }
     }
 
@@ -392,7 +422,7 @@ class BleMeshManager(
             return
         }
         if (gattServer.connectedDeviceCount > 0) {
-            for (fragment in MeshProtocolCodec.encode(payload)) {
+            for (fragment in MeshProtocolCodec.encode(payload, chunkSize)) {
                 gattServer.sendNotification(MESSAGE_CHAR_UUID, fragment)
             }
             return
@@ -401,19 +431,47 @@ class BleMeshManager(
     }
 
     suspend fun broadcastRoutedMessage(packet: BlePayload.RoutedMessage) {
-        val fragments = MeshProtocolCodec.encode(packet)
+        val fragments = MeshProtocolCodec.encode(packet, chunkSize)
         if (gattServer.connectedDeviceCount > 0) {
             for (fragment in fragments) {
                 gattServer.sendNotification(MESSAGE_CHAR_UUID, fragment)
             }
         }
         connectedGatt?.let { gatt ->
-            try { writeFragmentsCentral(gatt, MESSAGE_CHAR_UUID, packet) } catch (_: Exception) {}
+            writeFragmentsCentral(gatt, MESSAGE_CHAR_UUID, packet)
         }
     }
 
+    suspend fun sendRoutedMessageTo(packet: BlePayload.RoutedMessage, bleAddress: String): Boolean {
+        val fragments = MeshProtocolCodec.encode(packet, chunkSize)
+        Log.d(
+            TAG,
+            "sendRoutedMessageTo packet=${packet.packetId.takeLast(8)} ble=$bleAddress " +
+                "fragments=${fragments.size} mtu=$negotiatedMtu"
+        )
+
+        if (connectedGatt?.device?.address == bleAddress) {
+            val gatt = connectedGatt ?: return false
+            writeFragmentsCentral(gatt, MESSAGE_CHAR_UUID, packet)
+            Log.d(TAG, "sendRoutedMessageTo path=central packet=${packet.packetId.takeLast(8)}")
+            return true
+        }
+
+        if (gattServer.isConnectedTo(bleAddress)) {
+            for (fragment in fragments) {
+                val sent = gattServer.sendNotificationTo(bleAddress, MESSAGE_CHAR_UUID, fragment)
+                if (!sent) return false
+            }
+            Log.d(TAG, "sendRoutedMessageTo path=peripheral packet=${packet.packetId.takeLast(8)}")
+            return true
+        }
+
+        Log.d(TAG, "sendRoutedMessageTo no active path packet=${packet.packetId.takeLast(8)} ble=$bleAddress")
+        return false
+    }
+
     suspend fun broadcastRouteFailure(failure: BlePayload.RouteFailure) {
-        val fragments = MeshProtocolCodec.encode(failure)
+        val fragments = MeshProtocolCodec.encode(failure, chunkSize)
         if (gattServer.connectedDeviceCount > 0) {
             for (fragment in fragments) gattServer.sendNotification(MESSAGE_CHAR_UUID, fragment)
         }
@@ -433,7 +491,7 @@ class BleMeshManager(
      * the BLE connection.
      */
     suspend fun broadcastDeliveryAck(ack: BlePayload.DeliveryAck) {
-        val fragments = MeshProtocolCodec.encode(ack)
+        val fragments = MeshProtocolCodec.encode(ack, chunkSize)
         if (gattServer.connectedDeviceCount > 0) {
             for (fragment in fragments) gattServer.sendNotification(ACK_CHAR_UUID, fragment)
         }
@@ -445,7 +503,7 @@ class BleMeshManager(
     }
 
     suspend fun broadcastBeacon(beacon: BlePayload.Beacon) {
-        val fragments = MeshProtocolCodec.encode(beacon)
+        val fragments = MeshProtocolCodec.encode(beacon, chunkSize)
         if (gattServer.connectedDeviceCount > 0) {
             for (fragment in fragments) {
                 gattServer.sendNotification(MESSAGE_CHAR_UUID, fragment)
@@ -463,7 +521,7 @@ class BleMeshManager(
             if (gatt != null) {
                 writeFragmentsCentral(gatt, ACK_CHAR_UUID, payload)
             } else if (gattServer.connectedDeviceCount > 0) {
-                for (fragment in MeshProtocolCodec.encode(payload)) {
+                for (fragment in MeshProtocolCodec.encode(payload, chunkSize)) {
                     gattServer.sendNotification(ACK_CHAR_UUID, fragment)
                 }
             }
@@ -475,7 +533,7 @@ class BleMeshManager(
     private suspend fun writeFragmentsCentral(gatt: BluetoothGatt, charUUID: String, payload: BlePayload) {
         val service = gatt.getService(UUID.fromString(SERVICE_UUID)) ?: throw Exception("Service not found")
         val char    = service.getCharacteristic(UUID.fromString(charUUID)) ?: throw Exception("Char $charUUID not found")
-        val fragments = MeshProtocolCodec.encode(payload)
+        val fragments = MeshProtocolCodec.encode(payload, chunkSize)
 
         gattWriteMutex.lock()
         try {
@@ -533,11 +591,17 @@ class BleMeshManager(
         connectedGatt = null
         gattServer.stop()
         peripheralStarted = false
+        peripheralStarting = false
         discoveredNames.clear()
         updateState()
     }
 
     fun resetDiscoveredPeers() {
         discoveredNames.clear()
+    }
+
+    fun canReachBleAddress(bleAddress: String?): Boolean {
+        if (bleAddress.isNullOrBlank()) return false
+        return connectedGatt?.device?.address == bleAddress || gattServer.isConnectedTo(bleAddress)
     }
 }

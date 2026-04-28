@@ -224,6 +224,7 @@ class MeshProtocolCodecMeshTest {
     private fun routedMsg(
         packetId: String = "pkt-xyz-001",
         srcKey: String = "src-node-key",
+        srcName: String = "Alice",
         dstKey: String = "dst-node-key",
         dstName: String = "Bob",
         geoHint: String = "SF:US",
@@ -237,6 +238,7 @@ class MeshProtocolCodecMeshTest {
     ) = BlePayload.RoutedMessage(
         packetId = packetId,
         sourcePublicKey = srcKey,
+        sourceDisplayNameSnapshot = srcName,
         destinationPublicKey = dstKey,
         destinationDisplayNameSnapshot = dstName,
         destinationGeoHint = geoHint,
@@ -252,6 +254,7 @@ class MeshProtocolCodecMeshTest {
     private fun assertRoutedMessageEquals(expected: BlePayload.RoutedMessage, actual: BlePayload.RoutedMessage) {
         assertEquals(expected.packetId, actual.packetId)
         assertEquals(expected.sourcePublicKey, actual.sourcePublicKey)
+        assertEquals(expected.sourceDisplayNameSnapshot, actual.sourceDisplayNameSnapshot)
         assertEquals(expected.destinationPublicKey, actual.destinationPublicKey)
         assertEquals(expected.destinationDisplayNameSnapshot, actual.destinationDisplayNameSnapshot)
         assertEquals(expected.destinationGeoHint, actual.destinationGeoHint)

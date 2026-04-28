@@ -33,6 +33,7 @@ sealed class BlePayload {
     data class RoutedMessage(
         val packetId: String,
         val sourcePublicKey: String,
+        val sourceDisplayNameSnapshot: String,
         val destinationPublicKey: String,
         val destinationDisplayNameSnapshot: String,
         val destinationGeoHint: String,

@@ -131,7 +131,15 @@ class BleSyncCoordinator(
             is BlePayload.Message        -> handleMessage(payload, fromAddress)
             is BlePayload.Ack            -> handleAck(payload)
             is BlePayload.Beacon         -> handleBeacon(payload, fromAddress)
-            is BlePayload.RoutedMessage  -> meshRouter.onMessageReceived(payload, fromAddress)
+            is BlePayload.RoutedMessage  -> {
+                Log.d(
+                    TAG,
+                    "RoutedMessage rx packet=${payload.packetId.takeLast(8)} from=$fromAddress " +
+                        "src=${payload.sourcePublicKey.take(12)} dst=${payload.destinationPublicKey.take(12)} " +
+                        "ttl=${payload.ttl} hop=${payload.hopCount} mode=${payload.routingMode}"
+                )
+                meshRouter.onMessageReceived(payload, fromAddress)
+            }
             is BlePayload.RouteAck       -> { /* hop-level ack; unused in Phase 5 */ }
             is BlePayload.DeliveryAck    -> handleDeliveryAck(payload)
             is BlePayload.RouteFailure   -> handleRouteFailure(payload)
@@ -190,6 +198,7 @@ class BleSyncCoordinator(
     // ── Mesh delivery ack / failure ───────────────────────────────────────────
 
     private suspend fun handleDeliveryAck(ack: BlePayload.DeliveryAck) {
+        Log.d(TAG, "DeliveryAck rx packet=${ack.packetId.takeLast(8)} from=${ack.destinationNodeId.take(12)}")
         if (ack.signature.isNotEmpty() && !crypto.verifyDeliveryAck(
                 ack.destinationNodeId, ack.packetId, ack.destinationNodeId,
                 ack.timestamp, ack.signature
@@ -205,6 +214,10 @@ class BleSyncCoordinator(
 
     private fun handleRouteFailure(failure: BlePayload.RouteFailure) {
         scope.launch {
+            Log.d(
+                TAG,
+                "RouteFailure rx packet=${failure.packetId.takeLast(8)} from=${failure.failingNodeId.take(12)} reason=${failure.reason}"
+            )
             conversationRepo.updateMessageStatus(failure.packetId, MessageStatus.FAILED_EXPIRED)
             meshRepo.markRelayFailed(failure.packetId, failure.reason)
             Log.d(TAG, "RouteFailure for ${failure.packetId}: ${failure.reason}")
