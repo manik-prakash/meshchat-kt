@@ -2,12 +2,13 @@ package com.meshchat.app.ui.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.meshchat.app.ble.BleSyncCoordinator
 import com.meshchat.app.data.repository.ConversationRepository
 import com.meshchat.app.data.repository.IdentityRepository
-import com.meshchat.app.domain.BlePayload
 import com.meshchat.app.domain.Message
 import com.meshchat.app.domain.MessageStatus
+import com.meshchat.app.runtime.MeshRuntimeRepository
+import com.meshchat.app.routing.MeshRouter
+import com.meshchat.app.routing.RoutingDecision
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -18,9 +19,11 @@ import kotlinx.coroutines.launch
 class ChatViewModel(
     private val conversationId: String,
     private val peerDeviceId: String,
+    private val peerDisplayName: String,
     private val identityRepo: IdentityRepository,
     private val conversationRepo: ConversationRepository,
-    private val coordinator: BleSyncCoordinator
+    private val meshRuntimeRepository: MeshRuntimeRepository,
+    private val meshRouter: MeshRouter
 ) : ViewModel() {
 
     val messages: StateFlow<List<Message>> = conversationRepo
@@ -37,40 +40,55 @@ class ChatViewModel(
     fun sendMessage(text: String) {
         if (text.isBlank()) return
         viewModelScope.launch {
+            meshRuntimeRepository.ensureRuntimeActive()
             val identity = identityRepo.ensureIdentity()
             val msg = conversationRepo.insertMessage(
                 conversationId = conversationId,
                 senderDeviceId = identity.publicKey,
-                text = text.take(500),
-                status = MessageStatus.SENDING
+                text           = text.take(500),
+                status         = MessageStatus.QUEUED
             )
-            coordinator.sendMessage(
-                msg,
-                BlePayload.Message(
-                    id             = msg.id,
-                    senderDeviceId = identity.publicKey,
-                    text           = msg.text,
-                    timestamp      = msg.createdAt
-                )
+            val decision = meshRouter.originate(
+                packetId             = msg.id,
+                destinationId        = peerDeviceId,
+                destinationDisplayName = peerDisplayName,
+                text                 = msg.text,
+                timestamp            = msg.createdAt
             )
+            conversationRepo.updateMessageStatus(msg.id, decision.toMessageStatus())
         }
     }
 
     fun retryMessage(messageId: String) {
         viewModelScope.launch {
+            meshRuntimeRepository.ensureRuntimeActive()
             val msg = messages.value.find { it.id == messageId } ?: return@launch
-            if (msg.status != MessageStatus.FAILED) return@launch
-            conversationRepo.updateMessageStatus(messageId, MessageStatus.SENDING)
-            val identity = identityRepo.ensureIdentity()
-            coordinator.sendMessage(
-                msg,
-                BlePayload.Message(
-                    id             = msg.id,
-                    senderDeviceId = identity.publicKey,
-                    text           = msg.text,
-                    timestamp      = msg.createdAt
-                )
+            if (msg.status !in RETRYABLE_STATUSES) return@launch
+            conversationRepo.updateMessageStatus(messageId, MessageStatus.QUEUED)
+            val decision = meshRouter.originate(
+                packetId             = messageId,
+                destinationId        = peerDeviceId,
+                destinationDisplayName = peerDisplayName,
+                text                 = msg.text,
+                timestamp            = msg.createdAt
             )
+            conversationRepo.updateMessageStatus(messageId, decision.toMessageStatus())
         }
     }
+
+    companion object {
+        private val RETRYABLE_STATUSES = setOf(
+            MessageStatus.FAILED,
+            MessageStatus.FAILED_UNREACHABLE,
+            MessageStatus.FAILED_EXPIRED,
+            MessageStatus.QUEUED
+        )
+    }
+}
+
+private fun RoutingDecision.toMessageStatus(): MessageStatus = when (this) {
+    RoutingDecision.DIRECT,
+    RoutingDecision.FORWARDED   -> MessageStatus.FORWARDED
+    RoutingDecision.QUEUED      -> MessageStatus.QUEUED
+    RoutingDecision.UNREACHABLE -> MessageStatus.FAILED_UNREACHABLE
 }

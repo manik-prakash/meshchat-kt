@@ -119,18 +119,22 @@ fun ChatScreen(vm: ChatViewModel, peerName: String, onBack: () -> Unit) {
 
 @Composable
 private fun MessageBubble(msg: Message, isMine: Boolean, onRetry: () -> Unit) {
+    val isFailure = msg.status in setOf(
+        MessageStatus.FAILED, MessageStatus.FAILED_UNREACHABLE, MessageStatus.FAILED_EXPIRED
+    )
+    val canRetry = isFailure || msg.status == MessageStatus.QUEUED
 
     Column(
         Modifier
             .fillMaxWidth()
-            .clickable(enabled = msg.status == MessageStatus.FAILED) { onRetry() },
+            .clickable(enabled = canRetry) { onRetry() },
         horizontalAlignment = if (isMine) Alignment.End else Alignment.Start
     ) {
         Text(
             msg.text,
             fontFamily = FontFamily.Monospace,
             fontSize = 13.sp,
-            color = if (msg.status == MessageStatus.FAILED) ErrorColor else TextPrimary,
+            color = if (isFailure) ErrorColor else TextPrimary,
             modifier = Modifier
                 .background(if (isMine) Surface else Background)
                 .padding(horizontal = 10.dp, vertical = 6.dp)
@@ -141,13 +145,21 @@ private fun MessageBubble(msg: Message, isMine: Boolean, onRetry: () -> Unit) {
                 fontFamily = FontFamily.Monospace, fontSize = 9.sp, color = TextMuted
             )
             Spacer(Modifier.width(4.dp))
-            val statusText = when (msg.status) {
-                MessageStatus.SENDING -> "…"
-                MessageStatus.SENT    -> "✓"
-                MessageStatus.FAILED  -> "[FAILED — tap to retry]"
+            val (statusText, statusColor) = when (msg.status) {
+                MessageStatus.SENDING            -> "..."           to TextMuted
+                MessageStatus.QUEUED             -> "[queued]"      to WarningColor
+                MessageStatus.FORWARDED          -> "~"             to Accent
+                MessageStatus.SENT               -> "v"             to TextMuted
+                MessageStatus.DELIVERED          -> "vv"            to Primary
+                MessageStatus.FAILED             -> "[failed]"      to ErrorColor
+                MessageStatus.FAILED_UNREACHABLE -> "[unreachable]" to ErrorColor
+                MessageStatus.FAILED_EXPIRED     -> "[expired]"     to ErrorColor
             }
-            Text(statusText, fontFamily = FontFamily.Monospace, fontSize = 9.sp,
-                color = if (msg.status == MessageStatus.FAILED) ErrorColor else TextMuted)
+            Text(statusText, fontFamily = FontFamily.Monospace, fontSize = 9.sp, color = statusColor)
+            if (canRetry) {
+                Spacer(Modifier.width(4.dp))
+                Text("tap to retry", fontFamily = FontFamily.Monospace, fontSize = 9.sp, color = TextMuted)
+            }
         }
     }
 }

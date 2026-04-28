@@ -12,6 +12,9 @@ interface RouteEventDao {
     @Query("SELECT * FROM route_events WHERE packet_id = :packetId ORDER BY timestamp ASC")
     fun getEventsForPacket(packetId: String): Flow<List<RouteEventEntity>>
 
+    @Query("SELECT * FROM route_events ORDER BY timestamp DESC LIMIT 1")
+    fun getLatestEvent(): Flow<RouteEventEntity?>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(event: RouteEventEntity)
 

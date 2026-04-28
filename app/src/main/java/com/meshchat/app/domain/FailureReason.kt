@@ -3,7 +3,13 @@ package com.meshchat.app.domain
 enum class FailureReason(val id: Byte) {
     TTL_EXCEEDED(0x00),
     NO_ROUTE(0x01),
-    DESTINATION_UNREACHABLE(0x02);
+    DESTINATION_UNREACHABLE(0x02),
+    /** Packet sat in relay queue past its 5-minute expiry. */
+    EXPIRED(0x03),
+    /** Cryptographic signature verification failed. */
+    SIGNATURE_INVALID(0x04),
+    /** Packet queued >2 min with no known location for destination. */
+    STALE_DESTINATION_LOCATION(0x05);
 
     companion object {
         fun fromId(id: Byte): FailureReason =

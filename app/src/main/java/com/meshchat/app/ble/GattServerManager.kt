@@ -7,6 +7,7 @@ import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
+import android.os.Build
 import android.os.ParcelUuid
 import android.util.Log
 import com.meshchat.app.ble.BleConstants.ACK_CHAR_UUID
@@ -46,6 +47,7 @@ class GattServerManager(private val context: Context) {
     private var gattServer: BluetoothGattServer? = null
     private var advertiser: BluetoothLeAdvertiser? = null
     private var advertising = false
+    private var advertiseCallback: AdvertiseCallback? = null
 
     private val connectedDevices = mutableSetOf<BluetoothDevice>()
     val connectedDeviceCount: Int get() = connectedDevices.size
@@ -112,17 +114,18 @@ class GattServerManager(private val context: Context) {
             device: BluetoothDevice, requestId: Int,
             offset: Int, characteristic: BluetoothGattCharacteristic
         ) {
-            gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, characteristic.value ?: ByteArray(0))
+            @Suppress("DEPRECATION")
+            val value = characteristic.value ?: ByteArray(0)
+            gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
         }
 
         override fun onDescriptorReadRequest(
             device: BluetoothDevice, requestId: Int,
             offset: Int, descriptor: BluetoothGattDescriptor
         ) {
-            gattServer?.sendResponse(
-                device, requestId, BluetoothGatt.GATT_SUCCESS, offset,
-                descriptor.value ?: BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
-            )
+            @Suppress("DEPRECATION")
+            val value = descriptor.value ?: BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+            gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
         }
 
         override fun onDescriptorWriteRequest(
@@ -131,6 +134,7 @@ class GattServerManager(private val context: Context) {
             preparedWrite: Boolean, responseNeeded: Boolean,
             offset: Int, value: ByteArray
         ) {
+            @Suppress("DEPRECATION")
             descriptor.value = value
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
@@ -202,29 +206,40 @@ class GattServerManager(private val context: Context) {
             .build()
 
         return suspendCancellableCoroutine { cont ->
-            advertiser?.startAdvertising(settings, data, scanResponse, object : AdvertiseCallback() {
+            val callback = object : AdvertiseCallback() {
                 override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
                     advertising = true
+                    advertiseCallback = this
                     Log.i(TAG, "Advertising started as $deviceName")
                     if (cont.isActive) cont.resume(true)
                 }
                 override fun onStartFailure(errorCode: Int) {
                     Log.e(TAG, "Advertising failed: error $errorCode")
+                    advertiseCallback = null
                     if (cont.isActive) cont.resume(false)
                 }
-            })
+            }
+            advertiseCallback = callback
+            advertiser?.startAdvertising(settings, data, scanResponse, callback)
         }
     }
 
     /**
      * Notify all connected centrals on the given characteristic.
-     * API 33+ overload passes value directly without mutating characteristic.value.
+     * On API 33+ the value is passed directly; on older APIs it is written to
+     * characteristic.value first (the only overload available pre-33).
      */
+    @Suppress("DEPRECATION")
     fun sendNotification(charUUID: String, value: ByteArray) {
         val char = characteristics[charUUID.lowercase()] ?: return
         for (device in connectedDevices.toList()) {
             try {
-                gattServer?.notifyCharacteristicChanged(device, char, false, value)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    gattServer?.notifyCharacteristicChanged(device, char, false, value)
+                } else {
+                    char.value = value
+                    gattServer?.notifyCharacteristicChanged(device, char, false)
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "Notify failed for ${device.address}: ${e.message}")
             }
@@ -232,11 +247,12 @@ class GattServerManager(private val context: Context) {
     }
 
     fun stop() {
-        try { advertiser?.stopAdvertising(null) } catch (_: Exception) {}
+        try { advertiseCallback?.let { advertiser?.stopAdvertising(it) } } catch (_: Exception) {}
         advertising = false
         try { gattServer?.close() } catch (_: Exception) {}
         gattServer = null
         advertiser = null
+        advertiseCallback = null
         connectedDevices.clear()
         characteristics.clear()
         preparedWriteBuffers.clear()

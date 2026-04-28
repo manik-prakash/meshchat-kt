@@ -44,6 +44,11 @@ class MeshRepository(
 
     fun getPendingRelayPackets(): Flow<List<RelayQueueEntity>> = relayQueueDao.getPending()
 
+    suspend fun getAllPendingRelayPackets(): List<RelayQueueEntity> = relayQueueDao.getAllPending()
+
+    suspend fun resetRelayPacket(packetId: String) =
+        relayQueueDao.resetToPending(packetId, System.currentTimeMillis())
+
     suspend fun getPendingPacketsFor(destinationPublicKey: String): List<RelayQueueEntity> =
         relayQueueDao.getPendingFor(destinationPublicKey)
 
@@ -86,6 +91,12 @@ class MeshRepository(
         relayQueueDao.resetInFlight()
     }
 
+    suspend fun getExpiredPendingPackets(expiredBefore: Long): List<RelayQueueEntity> =
+        relayQueueDao.getExpiredPending(expiredBefore)
+
+    suspend fun resetStaleInFlight(staleBefore: Long) =
+        relayQueueDao.resetStaleInFlight(staleBefore)
+
     suspend fun pruneSettledRelayPackets(olderThanMs: Long = SETTLED_TTL_MS) {
         relayQueueDao.pruneSettled(System.currentTimeMillis() - olderThanMs)
     }
@@ -96,6 +107,9 @@ class MeshRepository(
 
     suspend fun getRecentNeighbors(windowMs: Long = NEIGHBOR_WINDOW_MS): List<NeighborEntity> =
         neighborDao.getRecent(System.currentTimeMillis() - windowMs)
+
+    suspend fun getNeighborByPublicKey(publicKey: String): NeighborEntity? =
+        neighborDao.getByPublicKey(publicKey)
 
     suspend fun upsertNeighbor(neighbor: NeighborEntity) {
         neighborDao.upsert(neighbor)
@@ -134,6 +148,8 @@ class MeshRepository(
     fun getRouteEvents(packetId: String): Flow<List<RouteEventEntity>> =
         routeEventDao.getEventsForPacket(packetId)
 
+    fun getLatestRouteEvent(): Flow<RouteEventEntity?> = routeEventDao.getLatestEvent()
+
     suspend fun logRouteEvent(
         packetId: String,
         action: RouteAction,
@@ -158,6 +174,14 @@ class MeshRepository(
     companion object {
         const val SEEN_TTL_MS = 5 * 60_000L
         const val NEIGHBOR_WINDOW_MS = 10 * 60_000L
+        /** After this interval a neighbor is considered offline and pruned from the live table. */
+        const val NEIGHBOR_STALE_MS = 60_000L
+        /** Hard expiry for relay queue entries (5 min). */
+        const val PACKET_EXPIRY_MS = 5 * 60_000L
+        /** Packets queued > 2 min without a known destination location get a separate failure. */
+        const val STALE_LOCATION_TIMEOUT_MS = 2 * 60_000L
+        /** IN_FLIGHT entries older than this are reset to PENDING (crash / silent drop recovery). */
+        const val IN_FLIGHT_TIMEOUT_MS = 20_000L
         const val SETTLED_TTL_MS = 24 * 60 * 60_000L
         const val ROUTE_EVENT_TTL_MS = 7 * 24 * 60 * 60_000L
     }

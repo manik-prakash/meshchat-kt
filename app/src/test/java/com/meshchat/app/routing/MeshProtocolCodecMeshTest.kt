@@ -12,7 +12,7 @@ class MeshProtocolCodecMeshTest {
     // ── Beacon ───────────────────────────────────────────────────────────────
 
     @Test
-    fun `beacon round-trip`() {
+    fun `beacon round-trip minimal fields`() {
         val original = BlePayload.Beacon(
             nodeId = "node-abc-1",
             displayName = "Alice",
@@ -24,6 +24,31 @@ class MeshProtocolCodecMeshTest {
         assertEquals(original.displayName, decoded.displayName)
         assertEquals(original.timestamp, decoded.timestamp)
         assertEquals(original.seqNum, decoded.seqNum)
+        assertEquals(false, decoded.relayCapable)
+        assertEquals("", decoded.geohash)
+        assertEquals(0.0, decoded.lat, 0.0)
+        assertEquals(0.0, decoded.lon, 0.0)
+    }
+
+    @Test
+    fun `beacon round-trip with geo and relay flag`() {
+        val original = BlePayload.Beacon(
+            nodeId = "node-geo",
+            displayName = "Bob",
+            timestamp = 1_700_000_000_000L,
+            seqNum = 7,
+            relayCapable = true,
+            geohash = "u4pruyd",
+            lat = 48.8566,
+            lon = 2.3522,
+            signature = "sig-test"
+        )
+        val decoded = reassemble(MeshProtocolCodec.encode(original), "beacon_geo") as BlePayload.Beacon
+        assertEquals(original.relayCapable, decoded.relayCapable)
+        assertEquals(original.geohash, decoded.geohash)
+        assertEquals(original.lat, decoded.lat, 1e-9)
+        assertEquals(original.lon, decoded.lon, 1e-9)
+        assertEquals(original.signature, decoded.signature)
     }
 
     @Test
@@ -94,6 +119,30 @@ class MeshProtocolCodecMeshTest {
     }
 
     @Test
+    fun `routedMessage voidHopCount zero default round-trip`() {
+        val original = routedMsg()
+        val decoded = reassemble(MeshProtocolCodec.encode(original), "rm_void0") as BlePayload.RoutedMessage
+        assertEquals(0, decoded.voidHopCount)
+    }
+
+    @Test
+    fun `routedMessage voidHopCount boundary values round-trip`() {
+        for (v in listOf(0, 1, 3, 255)) {
+            val original = routedMsg(voidHopCount = v)
+            val decoded = reassemble(MeshProtocolCodec.encode(original), "rm_void_$v") as BlePayload.RoutedMessage
+            assertEquals(v, decoded.voidHopCount)
+        }
+    }
+
+    @Test
+    fun `routedMessage PERIMETER mode with voidHopCount round-trip`() {
+        val original = routedMsg(routingMode = RoutingMode.PERIMETER, voidHopCount = 2)
+        val decoded = reassemble(MeshProtocolCodec.encode(original), "rm_perimeter") as BlePayload.RoutedMessage
+        assertEquals(RoutingMode.PERIMETER, decoded.routingMode)
+        assertEquals(2, decoded.voidHopCount)
+    }
+
+    @Test
     fun `routedMessage all chunks are at most CHUNK_SIZE bytes`() {
         val original = routedMsg(body = "A".repeat(500))
         val chunks = MeshProtocolCodec.encode(original)
@@ -157,7 +206,7 @@ class MeshProtocolCodecMeshTest {
     fun `timestamp large value survives round-trip in all mesh types`() {
         val ts = Long.MAX_VALUE / 2  // large but not overflow-triggering
 
-        val beacon = BlePayload.Beacon("n", "X", ts, 0)
+        val beacon = BlePayload.Beacon(nodeId = "n", displayName = "X", timestamp = ts, seqNum = 0)
         assertEquals(ts, (reassemble(MeshProtocolCodec.encode(beacon), "ts_b") as BlePayload.Beacon).timestamp)
 
         val rack = BlePayload.RouteAck("p", "h", ts)
@@ -180,6 +229,7 @@ class MeshProtocolCodecMeshTest {
         geoHint: String = "SF:US",
         ttl: Int = 7,
         hopCount: Int = 0,
+        voidHopCount: Int = 0,
         routingMode: RoutingMode = RoutingMode.BROADCAST,
         timestamp: Long = 1_700_000_000_000L,
         sig: String = "sig-placeholder",
@@ -192,6 +242,7 @@ class MeshProtocolCodecMeshTest {
         destinationGeoHint = geoHint,
         ttl = ttl,
         hopCount = hopCount,
+        voidHopCount = voidHopCount,
         routingMode = routingMode,
         timestamp = timestamp,
         signature = sig,
@@ -206,6 +257,7 @@ class MeshProtocolCodecMeshTest {
         assertEquals(expected.destinationGeoHint, actual.destinationGeoHint)
         assertEquals(expected.ttl, actual.ttl)
         assertEquals(expected.hopCount, actual.hopCount)
+        assertEquals(expected.voidHopCount, actual.voidHopCount)
         assertEquals(expected.routingMode, actual.routingMode)
         assertEquals(expected.timestamp, actual.timestamp)
         assertEquals(expected.signature, actual.signature)

@@ -6,6 +6,7 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import com.meshchat.app.ble.BleConstants.ACK_CHAR_UUID
 import com.meshchat.app.ble.BleConstants.CCCD_UUID
@@ -135,8 +136,32 @@ class BleMeshManager(
             }
         }
 
-        // API 33+ — value provided directly
-        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+        // API 33+: value delivered directly (preferred overload).
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray
+        ) {
+            handleCharacteristicData(gatt, characteristic, value)
+        }
+
+        // API < 33: value must be read from characteristic.value (deprecated but only path pre-33).
+        @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                handleCharacteristicData(gatt, characteristic, characteristic.value ?: return)
+            }
+            // On API 33+ the three-arg overload above is called instead; this one is never triggered.
+        }
+
+        private fun handleCharacteristicData(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray
+        ) {
             val sourceKey = "central_${gatt.device.address}_${characteristic.uuid}"
             try {
                 val payload = MeshProtocolCodec.decode(value, sourceKey) ?: return
@@ -327,10 +352,22 @@ class BleMeshManager(
         withTimeout(5_000) {
             suspendCoroutine { cont ->
                 pendingDescWriteCont = cont
-                val status = gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-                if (status != BluetoothStatusCodes.SUCCESS) cont.resume(false)
+                val ok = writeDescriptorCompat(gatt, descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                if (!ok) cont.resume(false)
             }
         }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun writeDescriptorCompat(
+        gatt: BluetoothGatt,
+        descriptor: BluetoothGattDescriptor,
+        value: ByteArray
+    ): Boolean = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        gatt.writeDescriptor(descriptor, value) == BluetoothStatusCodes.SUCCESS
+    } else {
+        descriptor.value = value
+        gatt.writeDescriptor(descriptor)
     }
 
     suspend fun disconnect() {
@@ -363,6 +400,62 @@ class BleMeshManager(
         throw IllegalStateException("Not connected to any peer")
     }
 
+    suspend fun broadcastRoutedMessage(packet: BlePayload.RoutedMessage) {
+        val fragments = MeshProtocolCodec.encode(packet)
+        if (gattServer.connectedDeviceCount > 0) {
+            for (fragment in fragments) {
+                gattServer.sendNotification(MESSAGE_CHAR_UUID, fragment)
+            }
+        }
+        connectedGatt?.let { gatt ->
+            try { writeFragmentsCentral(gatt, MESSAGE_CHAR_UUID, packet) } catch (_: Exception) {}
+        }
+    }
+
+    suspend fun broadcastRouteFailure(failure: BlePayload.RouteFailure) {
+        val fragments = MeshProtocolCodec.encode(failure)
+        if (gattServer.connectedDeviceCount > 0) {
+            for (fragment in fragments) gattServer.sendNotification(MESSAGE_CHAR_UUID, fragment)
+        }
+        connectedGatt?.let { gatt ->
+            try { writeFragmentsCentral(gatt, MESSAGE_CHAR_UUID, failure) } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * Send a DeliveryAck over every available BLE path.
+     *
+     * Unlike [sendAck] (legacy single-hop), this covers the full bidirectional case:
+     *  - Peripheral path: notify all centrals connected to our GATT server.
+     *  - Central path:    write to the GATT server we're connected to as a client.
+     *
+     * Both paths are tried so the ACK is delivered regardless of which device initiated
+     * the BLE connection.
+     */
+    suspend fun broadcastDeliveryAck(ack: BlePayload.DeliveryAck) {
+        val fragments = MeshProtocolCodec.encode(ack)
+        if (gattServer.connectedDeviceCount > 0) {
+            for (fragment in fragments) gattServer.sendNotification(ACK_CHAR_UUID, fragment)
+        }
+        connectedGatt?.let { gatt ->
+            try { writeFragmentsCentral(gatt, ACK_CHAR_UUID, ack) } catch (e: Exception) {
+                Log.w(TAG, "broadcastDeliveryAck central write failed: ${e.message}")
+            }
+        }
+    }
+
+    suspend fun broadcastBeacon(beacon: BlePayload.Beacon) {
+        val fragments = MeshProtocolCodec.encode(beacon)
+        if (gattServer.connectedDeviceCount > 0) {
+            for (fragment in fragments) {
+                gattServer.sendNotification(MESSAGE_CHAR_UUID, fragment)
+            }
+        }
+        connectedGatt?.let { gatt ->
+            try { writeFragmentsCentral(gatt, MESSAGE_CHAR_UUID, beacon) } catch (_: Exception) {}
+        }
+    }
+
     suspend fun sendAck(messageId: String) {
         val payload = BlePayload.Ack(messageId)
         try {
@@ -390,16 +483,27 @@ class BleMeshManager(
                 withTimeout(5_000) {
                     suspendCoroutine { cont ->
                         pendingCharWriteCont = cont
-                        val status = gatt.writeCharacteristic(
-                            char, fragment, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                        )
-                        if (status != BluetoothStatusCodes.SUCCESS) cont.resume(false)
+                        val ok = writeCharacteristicCompat(gatt, char, fragment)
+                        if (!ok) cont.resume(false)
                     }
                 }
             }
         } finally {
             gattWriteMutex.unlock()
         }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun writeCharacteristicCompat(
+        gatt: BluetoothGatt,
+        char: BluetoothGattCharacteristic,
+        value: ByteArray
+    ): Boolean = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        gatt.writeCharacteristic(char, value, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothStatusCodes.SUCCESS
+    } else {
+        char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        char.value = value
+        gatt.writeCharacteristic(char)
     }
 
     // ── State helpers ────────────────────────────────────────────────────────
@@ -418,11 +522,22 @@ class BleMeshManager(
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     fun destroy() {
+        stopRuntime()
+        scope.cancel()
+    }
+
+    fun stopRuntime() {
         stopScan()
         connectedGatt?.disconnect()
         connectedGatt?.close()
         connectedGatt = null
         gattServer.stop()
-        scope.cancel()
+        peripheralStarted = false
+        discoveredNames.clear()
+        updateState()
+    }
+
+    fun resetDiscoveredPeers() {
+        discoveredNames.clear()
     }
 }

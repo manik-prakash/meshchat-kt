@@ -34,9 +34,14 @@ fun MessageEntity.toDomain() = Message(
     senderDeviceId = senderDeviceId,
     text = text,
     status = when (status) {
-        "sent" -> MessageStatus.SENT
-        "failed" -> MessageStatus.FAILED
-        else -> MessageStatus.SENDING
+        "sent"               -> MessageStatus.SENT
+        "queued"             -> MessageStatus.QUEUED
+        "forwarded"          -> MessageStatus.FORWARDED
+        "delivered"          -> MessageStatus.DELIVERED
+        "failed"             -> MessageStatus.FAILED
+        "failed_unreachable" -> MessageStatus.FAILED_UNREACHABLE
+        "failed_expired"     -> MessageStatus.FAILED_EXPIRED
+        else                 -> MessageStatus.SENDING
     },
     createdAt = createdAt
 )

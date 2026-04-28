@@ -17,7 +17,6 @@ import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
-import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import com.meshchat.app.MeshChatApplication
@@ -25,13 +24,12 @@ import com.meshchat.app.ui.screen.ChatScreen
 import com.meshchat.app.ui.screen.ConversationsScreen
 import com.meshchat.app.ui.screen.NearbyScreen
 import com.meshchat.app.ui.screen.OnboardingScreen
+import com.meshchat.app.ui.screen.PermissionScreen
 import com.meshchat.app.ui.screen.SettingsScreen
-import com.meshchat.app.ui.theme.Accent
 import com.meshchat.app.ui.theme.Background
 import com.meshchat.app.ui.theme.Primary
 import com.meshchat.app.ui.theme.Surface
 import com.meshchat.app.ui.theme.TextMuted
-import com.meshchat.app.ui.theme.TextPrimary
 import com.meshchat.app.ui.viewmodel.BootstrapDest
 import com.meshchat.app.ui.viewmodel.BootstrapViewModel
 import com.meshchat.app.ui.viewmodel.ChatViewModel
@@ -45,6 +43,7 @@ import kotlinx.serialization.Serializable
 
 @Serializable object Bootstrap
 @Serializable object Onboarding
+@Serializable object Permissions
 @Serializable object Nearby
 @Serializable object Conversations
 @Serializable object Settings
@@ -83,19 +82,23 @@ fun AppNavigation() {
     val navController = rememberNavController()
     val context = LocalContext.current
     val app = context.applicationContext as MeshChatApplication
+    LaunchedEffect(Unit) {
+        app.container.meshRuntimeRepository.restorePersistentServiceIfNeeded()
+    }
 
     NavHost(navController = navController, startDestination = Bootstrap) {
 
         composable<Bootstrap> {
             val vm: BootstrapViewModel = viewModel {
-                BootstrapViewModel(app.container.identityRepository)
+                BootstrapViewModel(app.container.identityRepository, context)
             }
             val dest by vm.dest.collectAsState()
             LaunchedEffect(dest) {
                 when (dest) {
-                    BootstrapDest.ONBOARDING -> navController.navigate(Onboarding) { popUpTo(Bootstrap) { inclusive = true } }
-                    BootstrapDest.NEARBY     -> navController.navigate(Nearby)     { popUpTo(Bootstrap) { inclusive = true } }
-                    BootstrapDest.PENDING    -> Unit
+                    BootstrapDest.ONBOARDING  -> navController.navigate(Onboarding)   { popUpTo(Bootstrap) { inclusive = true } }
+                    BootstrapDest.PERMISSIONS -> navController.navigate(Permissions)  { popUpTo(Bootstrap) { inclusive = true } }
+                    BootstrapDest.NEARBY      -> navController.navigate(Nearby)       { popUpTo(Bootstrap) { inclusive = true } }
+                    BootstrapDest.PENDING     -> Unit
                 }
             }
         }
@@ -105,8 +108,17 @@ fun AppNavigation() {
                 OnboardingViewModel(app.container.identityRepository)
             }
             OnboardingScreen(vm = vm, onDone = {
-                navController.navigate(Nearby) {
+                // Always go through the permission flow after completing onboarding.
+                navController.navigate(Permissions) {
                     popUpTo(Onboarding) { inclusive = true }
+                }
+            })
+        }
+
+        composable<Permissions> {
+            PermissionScreen(onDone = {
+                navController.navigate(Nearby) {
+                    popUpTo(Permissions) { inclusive = true }
                 }
             })
         }
@@ -115,7 +127,10 @@ fun AppNavigation() {
         composable<Nearby> {
             MainScaffold(currentRoute = it.destination, navController = navController) {
                 val vm: NearbyViewModel = viewModel {
-                    NearbyViewModel(app.container.bleMeshManager, app.container.bleSyncCoordinator)
+                    NearbyViewModel(
+                        app.container.meshRepository,
+                        app.container.meshRuntimeRepository
+                    )
                 }
                 NearbyScreen(vm = vm, onOpenChat = { conv ->
                     navController.navigate(Chat(conv.id, conv.peerDisplayName, conv.peerDeviceId))
@@ -137,7 +152,10 @@ fun AppNavigation() {
         composable<Settings> {
             MainScaffold(currentRoute = it.destination, navController = navController) {
                 val vm: SettingsViewModel = viewModel {
-                    SettingsViewModel(app.container.identityRepository)
+                    SettingsViewModel(
+                        app.container.identityRepository,
+                        app.container.meshRuntimeRepository
+                    )
                 }
                 SettingsScreen(vm = vm)
             }
@@ -147,17 +165,19 @@ fun AppNavigation() {
             val route = backStackEntry.toRoute<Chat>()
             val vm: ChatViewModel = viewModel {
                 ChatViewModel(
-                    conversationId   = route.conversationId,
-                    peerDeviceId     = route.peerDeviceId,
-                    identityRepo     = app.container.identityRepository,
-                    conversationRepo = app.container.conversationRepository,
-                    coordinator      = app.container.bleSyncCoordinator
+                    conversationId        = route.conversationId,
+                    peerDeviceId          = route.peerDeviceId,
+                    peerDisplayName       = route.peerName,
+                    identityRepo          = app.container.identityRepository,
+                    conversationRepo      = app.container.conversationRepository,
+                    meshRuntimeRepository = app.container.meshRuntimeRepository,
+                    meshRouter            = app.container.meshRouter
                 )
             }
             ChatScreen(
-                vm          = vm,
-                peerName    = route.peerName,
-                onBack      = { navController.popBackStack() }
+                vm       = vm,
+                peerName = route.peerName,
+                onBack   = { navController.popBackStack() }
             )
         }
     }

@@ -98,13 +98,20 @@ class CryptoManager {
         signatureBase64
     )
 
-    fun signBeacon(nodeId: String, displayName: String, timestamp: Long, seqNum: Int): String =
-        sign(beaconBytes(nodeId, displayName, timestamp, seqNum))
+    fun signBeacon(
+        nodeId: String, displayName: String, timestamp: Long, seqNum: Int,
+        relayCapable: Boolean = false, geohash: String = "", lat: Double = 0.0, lon: Double = 0.0
+    ): String = sign(beaconBytes(nodeId, displayName, timestamp, seqNum, relayCapable, geohash, lat, lon))
 
     fun verifyBeacon(
         peerPublicKeyBase64: String, nodeId: String, displayName: String,
-        timestamp: Long, seqNum: Int, signatureBase64: String
-    ): Boolean = verify(peerPublicKeyBase64, beaconBytes(nodeId, displayName, timestamp, seqNum), signatureBase64)
+        timestamp: Long, seqNum: Int, relayCapable: Boolean = false, geohash: String = "",
+        lat: Double = 0.0, lon: Double = 0.0, signatureBase64: String
+    ): Boolean = verify(
+        peerPublicKeyBase64,
+        beaconBytes(nodeId, displayName, timestamp, seqNum, relayCapable, geohash, lat, lon),
+        signatureBase64
+    )
 
     fun signDeliveryAck(packetId: String, destinationNodeId: String, timestamp: Long): String =
         sign(deliveryAckBytes(packetId, destinationNodeId, timestamp))
@@ -135,14 +142,20 @@ class CryptoManager {
         toByteArray()
     }
 
-    private fun beaconBytes(nodeId: String, displayName: String, timestamp: Long, seqNum: Int): ByteArray =
-        ByteArrayOutputStream().run {
-            write(nodeId.toByteArray())
-            write(displayName.toByteArray())
-            writeLongBE(timestamp)
-            writeIntBE(seqNum)
-            toByteArray()
-        }
+    private fun beaconBytes(
+        nodeId: String, displayName: String, timestamp: Long, seqNum: Int,
+        relayCapable: Boolean, geohash: String, lat: Double, lon: Double
+    ): ByteArray = ByteArrayOutputStream().run {
+        write(nodeId.toByteArray())
+        write(displayName.toByteArray())
+        writeLongBE(timestamp)
+        writeIntBE(seqNum)
+        write(if (relayCapable) 1 else 0)
+        write(geohash.toByteArray())
+        writeLongBE(java.lang.Double.doubleToRawLongBits(lat))
+        writeLongBE(java.lang.Double.doubleToRawLongBits(lon))
+        toByteArray()
+    }
 
     private fun deliveryAckBytes(packetId: String, dstNodeId: String, timestamp: Long): ByteArray =
         ByteArrayOutputStream().run {

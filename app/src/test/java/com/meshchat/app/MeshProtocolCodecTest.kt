@@ -11,14 +11,14 @@ class MeshProtocolCodecTest {
 
     @Test
     fun `handshake round-trip`() {
-        val original = BlePayload.Handshake(deviceId = "abc12345", displayName = "Alice")
+        val original = BlePayload.Handshake(nodeId = "abc12345", displayName = "Alice")
         val chunks = MeshProtocolCodec.encode(original)
         assertEquals(1, chunks.size)  // fits in one 18-byte chunk
         val decoded = MeshProtocolCodec.decode(chunks[0])
         assertNotNull(decoded)
         val hs = decoded as BlePayload.Handshake
         assertEquals("Alice", hs.displayName)
-        assertEquals("abc12345", hs.deviceId)
+        assertEquals("abc12345", hs.nodeId)
     }
 
     @Test
@@ -60,12 +60,12 @@ class MeshProtocolCodecTest {
     }
 
     @Test
-    fun `deviceId truncated to 8 chars in handshake`() {
+    fun `nodeId truncated to 8 chars in handshake`() {
         val long = "12345678-abcd-ef01-2345-6789abcdef01"
-        val original = BlePayload.Handshake(deviceId = long, displayName = "Bob")
+        val original = BlePayload.Handshake(nodeId = long, displayName = "Bob")
         val chunks = MeshProtocolCodec.encode(original)
         val decoded = reassemble(chunks, "trunc") as BlePayload.Handshake
-        assertEquals(long.take(8), decoded.deviceId)
+        assertEquals(long.take(8), decoded.nodeId)
     }
 
     @Test

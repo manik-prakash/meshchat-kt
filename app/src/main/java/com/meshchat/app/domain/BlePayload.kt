@@ -22,7 +22,11 @@ sealed class BlePayload {
         val displayName: String,
         val timestamp: Long,
         val seqNum: Int,
-        val signature: String
+        val relayCapable: Boolean = false,
+        val geohash: String = "",
+        val lat: Double = 0.0,
+        val lon: Double = 0.0,
+        val signature: String = ""
     ) : BlePayload()
 
     /** Mesh-routed message carrying full relay metadata. */
@@ -34,6 +38,8 @@ sealed class BlePayload {
         val destinationGeoHint: String,
         val ttl: Int,
         val hopCount: Int,
+        /** Number of consecutive perimeter (void-bypass) hops since the last greedy advance. */
+        val voidHopCount: Int = 0,
         val routingMode: RoutingMode,
         val timestamp: Long,
         val signature: String,
@@ -52,7 +58,7 @@ sealed class BlePayload {
         val packetId: String,
         val destinationNodeId: String,
         val timestamp: Long,
-        val signature: String
+        val signature: String = ""
     ) : BlePayload()
 
     /** Routing failure report propagated back toward the source. */
@@ -61,6 +67,6 @@ sealed class BlePayload {
         val failingNodeId: String,
         val reason: FailureReason,
         val timestamp: Long,
-        val signature: String
+        val signature: String = ""
     ) : BlePayload()
 }

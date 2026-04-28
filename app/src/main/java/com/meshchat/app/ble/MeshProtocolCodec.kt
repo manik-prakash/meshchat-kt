@@ -22,7 +22,7 @@ import java.util.concurrent.ConcurrentHashMap
  * Mesh routing types:
  *   0x04 beacon:         [nodeId:1+n] [displayName:1+n] [timestamp:8BE] [seqNum:4BE] [sig:1+n]
  *   0x05 routedMessage:  [packetId:1+n] [srcKey:1+n] [dstKey:1+n] [dstName:1+n]
- *                        [geoHint:1+n] [ttl:1] [hopCount:1] [routingMode:1]
+ *                        [geoHint:1+n] [ttl:1] [hopCount:1] [voidHopCount:1] [routingMode:1]
  *                        [timestamp:8BE] [sig:1+n] [body:2+n]
  *   0x06 routeAck:       [packetId:1+n] [hopNodeId:1+n] [timestamp:8BE]
  *   0x07 deliveryAck:    [packetId:1+n] [dstNodeId:1+n] [timestamp:8BE] [sig:1+n]
@@ -70,6 +70,14 @@ object MeshProtocolCodec {
         return if (bytes.size <= CHUNK_SIZE) listOf(bytes) else fragment(bytes)
     }
 
+    /** Serialize a payload to a Base64 string for persistent storage (relay queue). */
+    fun encodeToBase64(payload: BlePayload): String =
+        java.util.Base64.getEncoder().encodeToString(serialize(payload))
+
+    /** Deserialize a Base64 string previously produced by [encodeToBase64]. */
+    fun decodeFromBase64(base64: String): BlePayload =
+        deserialize(java.util.Base64.getDecoder().decode(base64))
+
     private fun serialize(payload: BlePayload): ByteArray {
         val out = ByteArrayOutputStream()
         when (payload) {
@@ -105,6 +113,10 @@ object MeshProtocolCodec {
                 out.writeStr1(payload.displayName)
                 out.writeLongBE(payload.timestamp)
                 out.writeIntBE(payload.seqNum)
+                out.write(if (payload.relayCapable) 1 else 0)
+                out.writeStr1(payload.geohash)
+                out.writeDoubleBE(payload.lat)
+                out.writeDoubleBE(payload.lon)
                 out.writeStr1(payload.signature)
             }
             is BlePayload.RoutedMessage -> {
@@ -116,6 +128,7 @@ object MeshProtocolCodec {
                 out.writeStr1(payload.destinationGeoHint)
                 out.write(payload.ttl and 0xFF)
                 out.write(payload.hopCount and 0xFF)
+                out.write(payload.voidHopCount and 0xFF)
                 out.write(payload.routingMode.id.toInt() and 0xFF)
                 out.writeLongBE(payload.timestamp)
                 out.writeStr1(payload.signature)
@@ -261,8 +274,17 @@ object MeshProtocolCodec {
                 val (displayName, o2) = bytes.readStr1(o1)
                 val timestamp         = bytes.readLongBE(o2)
                 val seqNum            = bytes.readIntBE(o2 + 8)
-                val (sig, _)          = bytes.readStr1(o2 + 12)
-                BlePayload.Beacon(nodeId = nodeId, displayName = displayName, timestamp = timestamp, seqNum = seqNum, signature = sig)
+                val relayCapable      = bytes[o2 + 12].toInt() != 0
+                val (geohash, o3)     = bytes.readStr1(o2 + 13)
+                val lat               = bytes.readDoubleBE(o3)
+                val lon               = bytes.readDoubleBE(o3 + 8)
+                val (sig, _)          = bytes.readStr1(o3 + 16)
+                BlePayload.Beacon(
+                    nodeId = nodeId, displayName = displayName,
+                    timestamp = timestamp, seqNum = seqNum,
+                    relayCapable = relayCapable, geohash = geohash,
+                    lat = lat, lon = lon, signature = sig
+                )
             }
             TYPE_ROUTED_MSG -> {
                 val (packetId, o1)  = bytes.readStr1(off)
@@ -272,9 +294,10 @@ object MeshProtocolCodec {
                 val (geoHint, o5)   = bytes.readStr1(o4)
                 val ttl             = bytes[o5].toInt() and 0xFF
                 val hopCount        = bytes[o5 + 1].toInt() and 0xFF
-                val routingMode     = RoutingMode.fromId(bytes[o5 + 2])
-                val timestamp       = bytes.readLongBE(o5 + 3)
-                val (sig, o6)       = bytes.readStr1(o5 + 11)
+                val voidHopCount    = bytes[o5 + 2].toInt() and 0xFF
+                val routingMode     = RoutingMode.fromId(bytes[o5 + 3])
+                val timestamp       = bytes.readLongBE(o5 + 4)
+                val (sig, o6)       = bytes.readStr1(o5 + 12)
                 val (body, _)       = bytes.readStr2(o6)
                 BlePayload.RoutedMessage(
                     packetId = packetId,
@@ -284,6 +307,7 @@ object MeshProtocolCodec {
                     destinationGeoHint = geoHint,
                     ttl = ttl,
                     hopCount = hopCount,
+                    voidHopCount = voidHopCount,
                     routingMode = routingMode,
                     timestamp = timestamp,
                     signature = sig,
@@ -334,6 +358,9 @@ object MeshProtocolCodec {
         for (shift in 56 downTo 0 step 8) write(((v shr shift) and 0xFF).toInt())
     }
 
+    private fun ByteArrayOutputStream.writeDoubleBE(v: Double) =
+        writeLongBE(java.lang.Double.doubleToRawLongBits(v))
+
     private fun ByteArrayOutputStream.writeIntBE(v: Int) {
         write((v shr 24) and 0xFF)
         write((v shr 16) and 0xFF)
@@ -364,4 +391,7 @@ object MeshProtocolCodec {
         ((this[off + 1].toInt() and 0xFF) shl 16) or
         ((this[off + 2].toInt() and 0xFF) shl 8) or
         (this[off + 3].toInt() and 0xFF)
+
+    private fun ByteArray.readDoubleBE(off: Int): Double =
+        java.lang.Double.longBitsToDouble(readLongBE(off))
 }

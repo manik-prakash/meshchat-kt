@@ -1,172 +1,367 @@
 package com.meshchat.app.routing
 
 import android.util.Log
+import com.meshchat.app.ble.MeshProtocolCodec
 import com.meshchat.app.crypto.CryptoManager
 import com.meshchat.app.data.db.entity.NeighborEntity
+import com.meshchat.app.data.repository.IdentityRepository
 import com.meshchat.app.data.repository.MeshRepository
 import com.meshchat.app.domain.BlePayload
+import com.meshchat.app.domain.FailureReason
 import com.meshchat.app.domain.RouteAction
 import com.meshchat.app.domain.RoutingMode
+import com.meshchat.app.location.LocationProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
-import java.util.UUID
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.pow
+import kotlin.math.sin
+import kotlin.math.sqrt
 
-/**
- * Mesh routing entrypoint.
- *
- * The transport layer (BleMeshManager) calls these methods when BLE events
- * arrive. [sendMessage] is called by the UI layer to originate a new message.
- *
- * TTL is checked and decremented on every hop. Duplicate suppression uses
- * [MeshRepository] (persistent across restarts) instead of an in-memory cache.
- */
+enum class RoutingDecision { DIRECT, FORWARDED, QUEUED, UNREACHABLE }
+
 interface MeshRouter {
-    /** A neighbor node has broadcast its presence. */
-    fun onBeaconReceived(packet: BlePayload.Beacon, fromNeighbor: String)
+    /**
+     * Originate (or re-originate on retry) a mesh-routed message already stored in the
+     * conversation DB. The [packetId] doubles as the message row ID.
+     */
+    suspend fun originate(
+        packetId: String,
+        destinationId: String,
+        destinationDisplayName: String,
+        text: String,
+        timestamp: Long
+    ): RoutingDecision
 
-    /** A routed packet arrived from a neighbor; relay or deliver as appropriate. */
+    /** A RoutedMessage arrived over BLE; relay or deliver as appropriate. */
     fun onMessageReceived(packet: BlePayload.RoutedMessage, fromNeighbor: String)
 
-    /** A direct BLE link to a neighbor is now available for sending. */
-    fun onNeighborAvailable(neighborId: String)
-
-    /** Originate a new mesh message toward [destinationId]. */
-    suspend fun sendMessage(destinationId: String, destinationDisplayName: String, text: String)
+    /** A direct BLE link to a neighbor is available; drain queued packets. */
+    fun onNeighborAvailable(neighborPublicKey: String)
 }
 
 /**
- * @param selfNodeId    this node's stable public key (from IdentityRepository)
- * @param scope         coroutine scope owned by the calling component
- * @param meshRepository persistent routing state (seen packets, relay queue, neighbors)
- * @param crypto        signing and verification (private key never leaves Keystore)
- * @param forwardPacket called when a packet should be relayed to neighbors
- * @param deliverLocally called when a packet is addressed to this node
+ * @param forwardPacket      called to send a packet to all currently reachable BLE neighbors
+ * @param deliverLocally     called when a packet is addressed to this node
+ * @param reportFailure      called to propagate a RouteFailure back toward the source
+ * @param onQueuedForwarded  called when the worker successfully forwards a previously-QUEUED
+ *                           packet so the conversation status can be updated to FORWARDED
  */
 class MeshRouterImpl(
-    private val selfNodeId: String,
+    private val identityRepo: IdentityRepository,
     private val scope: CoroutineScope,
     private val meshRepository: MeshRepository,
     private val crypto: CryptoManager,
-    private val forwardPacket: suspend (packet: BlePayload.RoutedMessage, excludeNeighbor: String?) -> Unit,
+    private val locationProvider: LocationProvider,
+    private val forwardPacket: suspend (packet: BlePayload.RoutedMessage) -> Unit,
     private val deliverLocally: suspend (packet: BlePayload.RoutedMessage) -> Unit,
+    private val reportFailure: suspend (failure: BlePayload.RouteFailure) -> Unit = {},
+    private val onQueuedForwarded: suspend (packetId: String) -> Unit = {},
 ) : MeshRouter {
 
     private val TAG = "MeshRouter"
 
-    override fun onBeaconReceived(packet: BlePayload.Beacon, fromNeighbor: String) {
-        scope.launch {
-            if (packet.signature.isNotEmpty()) {
-                val valid = crypto.verifyBeacon(
-                    packet.nodeId, packet.nodeId, packet.displayName,
-                    packet.timestamp, packet.seqNum, packet.signature
-                )
-                if (!valid) {
-                    Log.w(TAG, "Dropping beacon from $fromNeighbor: invalid signature")
-                    return@launch
-                }
-            }
-            meshRepository.upsertNeighbor(
-                NeighborEntity(
-                    neighborPublicKey = packet.nodeId,
-                    displayName = packet.displayName,
-                    bleAddress = fromNeighbor,
-                    rssi = null,
-                    lastSeen = packet.timestamp,
-                    relayCapable = true,
-                    geohash = null,
-                    lat = null,
-                    lon = null,
-                    trustScore = 0.0
-                )
-            )
-        }
+    @Volatile private var cachedSelfId: String? = null
+    private suspend fun selfId(): String =
+        cachedSelfId ?: identityRepo.ensureIdentity().publicKey.also { cachedSelfId = it }
+
+    // ── Public API ────────────────────────────────────────────────────────────
+
+    override suspend fun originate(
+        packetId: String,
+        destinationId: String,
+        destinationDisplayName: String,
+        text: String,
+        timestamp: Long
+    ): RoutingDecision {
+        val self    = selfId()
+        val geoHint = meshRepository.getContact(destinationId)?.lastResolvedGeoHash ?: ""
+        val sig     = crypto.signRoutedMessage(packetId, self, destinationId, timestamp, text)
+        val packet  = BlePayload.RoutedMessage(
+            packetId = packetId,
+            sourcePublicKey = self,
+            destinationPublicKey = destinationId,
+            destinationDisplayNameSnapshot = destinationDisplayName,
+            destinationGeoHint = geoHint,
+            ttl = DEFAULT_TTL,
+            hopCount = 0,
+            voidHopCount = 0,
+            routingMode = RoutingMode.GREEDY,
+            timestamp = timestamp,
+            signature = sig,
+            body = text
+        )
+
+        meshRepository.resetRelayPacket(packetId)
+        meshRepository.enqueueRelayPacket(
+            packetId, destinationId,
+            MeshProtocolCodec.encodeToBase64(packet),
+            DEFAULT_TTL, RoutingMode.GREEDY
+        )
+        meshRepository.logRouteEvent(packetId, RouteAction.ORIGINATED)
+
+        return attemptForward(packet)
     }
 
     override fun onMessageReceived(packet: BlePayload.RoutedMessage, fromNeighbor: String) {
         scope.launch {
-            // Verify signature before any processing — reject unauthenticated packets
-            if (packet.signature.isNotEmpty()) {
-                val valid = crypto.verifyRoutedMessage(
-                    packet.sourcePublicKey,
-                    packet.packetId, packet.sourcePublicKey, packet.destinationPublicKey,
-                    packet.timestamp, packet.body, packet.signature
-                )
-                if (!valid) {
-                    Log.w(TAG, "Dropping packet ${packet.packetId}: invalid signature from ${packet.sourcePublicKey.take(16)}")
-                    meshRepository.logRouteEvent(packet.packetId, RouteAction.DROPPED_INVALID_SIG)
-                    return@launch
-                }
-            } else {
-                Log.w(TAG, "Received unsigned packet ${packet.packetId} — dropping")
+            if (packet.signature.isEmpty()) {
+                Log.w(TAG, "Dropping unsigned packet ${packet.packetId}")
+                meshRepository.logRouteEvent(packet.packetId, RouteAction.DROPPED_INVALID_SIG)
+                return@launch
+            }
+            val sigValid = crypto.verifyRoutedMessage(
+                packet.sourcePublicKey,
+                packet.packetId, packet.sourcePublicKey, packet.destinationPublicKey,
+                packet.timestamp, packet.body, packet.signature
+            )
+            if (!sigValid) {
+                Log.w(TAG, "Invalid sig on ${packet.packetId} from ${packet.sourcePublicKey.take(16)}")
                 meshRepository.logRouteEvent(packet.packetId, RouteAction.DROPPED_INVALID_SIG)
                 return@launch
             }
 
             if (meshRepository.isSeen(packet.packetId)) {
                 meshRepository.logRouteEvent(packet.packetId, RouteAction.DROPPED_DUPLICATE)
+                // The sender is retrying because it never received our DeliveryAck.
+                // Re-deliver (idempotent DB insert) so the ACK is sent again without
+                // re-inserting the message if it already exists.
+                if (packet.destinationPublicKey == selfId()) {
+                    Log.d(TAG, "Re-ACKing duplicate ${packet.packetId.take(16)} for self")
+                    deliverLocally(packet)
+                }
                 return@launch
             }
             meshRepository.markSeen(packet.packetId)
 
-            val remaining = packet.ttl - 1
-            if (remaining < 0) {
+            val ttlLeft = packet.ttl - 1
+            if (ttlLeft < 0) {
+                Log.d(TAG, "TTL exhausted for ${packet.packetId}")
                 meshRepository.logRouteEvent(packet.packetId, RouteAction.DROPPED_TTL)
+                sendRouteFailure(packet.packetId, FailureReason.TTL_EXCEEDED)
                 return@launch
             }
 
-            if (packet.destinationPublicKey == selfNodeId) {
+            val self = selfId()
+            if (packet.destinationPublicKey == self) {
                 meshRepository.logRouteEvent(packet.packetId, RouteAction.DELIVERED)
                 deliverLocally(packet)
             } else {
-                val relayed = packet.copy(ttl = remaining, hopCount = packet.hopCount + 1)
-                // TODO: select next hop from neighbor table instead of broadcasting
-                meshRepository.logRouteEvent(packet.packetId, RouteAction.FORWARDED)
-                forwardPacket(relayed, fromNeighbor)
+                // voidHopCount and routingMode are preserved from the incoming packet;
+                // they will be updated by attemptForward when forwarding.
+                val reduced = packet.copy(ttl = ttlLeft, hopCount = packet.hopCount + 1)
+                meshRepository.enqueueRelayPacket(
+                    reduced.packetId, reduced.destinationPublicKey,
+                    MeshProtocolCodec.encodeToBase64(reduced),
+                    reduced.ttl, reduced.routingMode
+                )
+                val decision = attemptForward(reduced)
+                if (decision == RoutingDecision.UNREACHABLE) {
+                    sendRouteFailure(reduced.packetId, FailureReason.NO_ROUTE)
+                }
             }
         }
     }
 
-    override fun onNeighborAvailable(neighborId: String) {
+    override fun onNeighborAvailable(neighborPublicKey: String) {
         scope.launch {
-            meshRepository.updateNeighborSighting(neighborId, rssi = null, bleAddress = neighborId)
-            val queued = meshRepository.getPendingPacketsFor(neighborId)
-            for (entry in queued) {
-                meshRepository.markRelayInFlight(entry.packetId)
-                // TODO: deserialize entry.serializedPayload and forward
-                meshRepository.logRouteEvent(entry.packetId, RouteAction.DEQUEUED, chosenNextHop = neighborId)
+            val pending = meshRepository.getAllPendingRelayPackets()
+            if (pending.isEmpty()) return@launch
+            Log.d(TAG, "Draining ${pending.size} queued packet(s) after neighbor=$neighborPublicKey")
+            for (entry in pending) {
+                try {
+                    val packet = MeshProtocolCodec.decodeFromBase64(entry.serializedPayload)
+                        as? BlePayload.RoutedMessage ?: continue
+                    if (packet.ttl <= 0) continue   // worker will expire this entry
+                    val decision = attemptForward(packet)
+                    meshRepository.logRouteEvent(
+                        packet.packetId, RouteAction.DEQUEUED,
+                        chosenNextHop = neighborPublicKey,
+                        reason = decision.name
+                    )
+                    // Update the conversation status so the UI reflects the forwarding result
+                    // (the original QUEUED status from originate() is now stale).
+                    if (decision == RoutingDecision.DIRECT || decision == RoutingDecision.FORWARDED) {
+                        onQueuedForwarded(packet.packetId)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Queue drain error for ${entry.packetId}: ${e.message}")
+                }
             }
         }
     }
 
-    override suspend fun sendMessage(
-        destinationId: String,
-        destinationDisplayName: String,
-        text: String
-    ) {
-        val packetId = UUID.randomUUID().toString()
-        val timestamp = System.currentTimeMillis()
-        val signature = crypto.signRoutedMessage(
-            packetId, selfNodeId, destinationId, timestamp, text
-        )
-        val packet = BlePayload.RoutedMessage(
-            packetId = packetId,
-            sourcePublicKey = selfNodeId,
-            destinationPublicKey = destinationId,
-            destinationDisplayNameSnapshot = destinationDisplayName,
-            destinationGeoHint = "",
-            ttl = DEFAULT_TTL,
-            hopCount = 0,
-            routingMode = RoutingMode.BROADCAST,
-            timestamp = timestamp,
-            signature = signature,
-            body = text
-        )
-        meshRepository.markSeen(packet.packetId)
-        meshRepository.logRouteEvent(packet.packetId, RouteAction.ORIGINATED)
-        forwardPacket(packet, null)
+    // ── Failure back-propagation ──────────────────────────────────────────────
+
+    private suspend fun sendRouteFailure(packetId: String, reason: FailureReason) {
+        try {
+            val self = selfId()
+            val now  = System.currentTimeMillis()
+            val sig  = crypto.signRouteFailure(packetId, self, reason.id, now)
+            reportFailure(BlePayload.RouteFailure(packetId, self, reason, now, sig))
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to emit RouteFailure for $packetId: ${e.message}")
+        }
+    }
+
+    // ── Routing core ──────────────────────────────────────────────────────────
+
+    /**
+     * Result of [selectForward]. Sealed so the caller must handle every case explicitly.
+     */
+    private sealed class ForwardDecision {
+        /** Neighbor is the destination itself — deliver directly. */
+        data class GreedyHop(
+            val hop: NeighborEntity,
+            /** True when this hop switches the packet back from PERIMETER to GREEDY. */
+            val recoveredFromPerimeter: Boolean = false
+        ) : ForwardDecision()
+
+        /** Greedy progress blocked; forward to best-available neighbor to route around the void. */
+        data class PerimeterHop(val hop: NeighborEntity) : ForwardDecision()
+
+        /** Consecutive perimeter hops reached [MAX_VOID_HOPS]; hold for a better neighbor. */
+        object VoidLimitExceeded : ForwardDecision()
+
+        /** No relay-capable neighbors with location data; check non-geo neighbors separately. */
+        object NoRoutableNeighbors : ForwardDecision()
+    }
+
+    private suspend fun attemptForward(packet: BlePayload.RoutedMessage): RoutingDecision {
+        // Fast path: destination is a directly-connected BLE neighbor right now.
+        if (meshRepository.getNeighborByPublicKey(packet.destinationPublicKey) != null) {
+            val outPacket = packet.copy(routingMode = RoutingMode.GREEDY, voidHopCount = 0)
+            meshRepository.markRelayInFlight(packet.packetId)
+            forwardPacket(outPacket)
+            meshRepository.logRouteEvent(packet.packetId, RouteAction.FORWARDED,
+                chosenNextHop = packet.destinationPublicKey,
+                reason = "direct")
+            return RoutingDecision.DIRECT
+        }
+
+        return when (val fd = selectForward(packet)) {
+            is ForwardDecision.GreedyHop -> {
+                val outPacket = packet.copy(routingMode = RoutingMode.GREEDY, voidHopCount = 0)
+                meshRepository.markRelayInFlight(packet.packetId)
+                forwardPacket(outPacket)
+                meshRepository.logRouteEvent(
+                    packet.packetId, RouteAction.FORWARDED,
+                    chosenNextHop = fd.hop.neighborPublicKey,
+                    reason = if (fd.recoveredFromPerimeter) "greedy_recovered" else null
+                )
+                RoutingDecision.FORWARDED
+            }
+
+            is ForwardDecision.PerimeterHop -> {
+                val newVoidCount = packet.voidHopCount + 1
+                val outPacket = packet.copy(
+                    routingMode  = RoutingMode.PERIMETER,
+                    voidHopCount = newVoidCount
+                )
+                meshRepository.markRelayInFlight(packet.packetId)
+                forwardPacket(outPacket)
+                meshRepository.logRouteEvent(
+                    packet.packetId, RouteAction.PERIMETER_HOP,
+                    chosenNextHop = fd.hop.neighborPublicKey,
+                    reason = "void=$newVoidCount/$MAX_VOID_HOPS"
+                )
+                Log.d(TAG, "Perimeter hop ${packet.packetId.take(16)} → ${fd.hop.neighborPublicKey.take(16)} void=$newVoidCount")
+                RoutingDecision.FORWARDED
+            }
+
+            ForwardDecision.VoidLimitExceeded -> {
+                meshRepository.logRouteEvent(
+                    packet.packetId, RouteAction.VOID_LIMIT_EXCEEDED,
+                    reason = "voidHopCount=${packet.voidHopCount} limit=$MAX_VOID_HOPS"
+                )
+                Log.d(TAG, "Void budget exhausted for ${packet.packetId.take(16)} — holding in queue")
+                // Keep packet PENDING; the worker or next beacon will re-evaluate.
+                RoutingDecision.QUEUED
+            }
+
+            ForwardDecision.NoRoutableNeighbors -> {
+                // No relay-capable neighbors with known locations. Check for any neighbors at all
+                // to distinguish QUEUED (there are neighbors but none are geo-capable yet) from
+                // UNREACHABLE (nobody around).
+                val anyNeighbors = meshRepository
+                    .getRecentNeighbors(MeshRepository.NEIGHBOR_STALE_MS)
+                    .isNotEmpty()
+                if (anyNeighbors) RoutingDecision.QUEUED else RoutingDecision.UNREACHABLE
+            }
+        }
+    }
+
+    /**
+     * Select the best neighbor to forward [packet] toward its destination.
+     *
+     * Priority order:
+     * 1. **Greedy** — a neighbor that is ≥[IMPROVEMENT_THRESHOLD] × closer to the destination
+     *    than the current node. Switches back from PERIMETER to GREEDY if applicable.
+     * 2. **Perimeter** — when greedy is blocked, pick the least-bad neighbor (closest to
+     *    destination) to route around the void, up to [MAX_VOID_HOPS] consecutive hops.
+     * 3. **VoidLimitExceeded** — if already in PERIMETER mode and budget exhausted, hold.
+     * 4. **NoRoutableNeighbors** — no relay-capable neighbors with location data.
+     */
+    private suspend fun selectForward(packet: BlePayload.RoutedMessage): ForwardDecision {
+        val candidates = meshRepository
+            .getRecentNeighbors(MeshRepository.NEIGHBOR_STALE_MS)
+            .filter { it.relayCapable && it.lat != null && it.lon != null }
+
+        if (candidates.isEmpty()) return ForwardDecision.NoRoutableNeighbors
+
+        val dstContact = meshRepository.getContact(packet.destinationPublicKey)
+        val dstLat     = dstContact?.lastResolvedLat
+        val dstLon     = dstContact?.lastResolvedLon
+
+        // No destination coordinates known — flood to the first relay-capable neighbor in both modes.
+        if (dstLat == null || dstLon == null) {
+            return ForwardDecision.GreedyHop(candidates.first())
+        }
+
+        val selfLoc  = locationProvider.getLastLocation()
+        val selfDist = if (selfLoc != null)
+            haversineKm(selfLoc.latitude, selfLoc.longitude, dstLat, dstLon)
+        else
+            Double.MAX_VALUE
+
+        // Closest neighbor to the destination (candidate for both greedy and perimeter).
+        val best     = candidates.minByOrNull { haversineKm(it.lat!!, it.lon!!, dstLat, dstLon) }!!
+        val bestDist = haversineKm(best.lat!!, best.lon!!, dstLat, dstLon)
+
+        if (bestDist < selfDist * IMPROVEMENT_THRESHOLD) {
+            // Greedy progress: this neighbor is meaningfully closer than we are.
+            val recovered = packet.routingMode == RoutingMode.PERIMETER
+            return ForwardDecision.GreedyHop(best, recovered)
+        }
+
+        // ── Greedy failed — routing void detected ────────────────────────────
+        // Check if the perimeter budget is exhausted before taking another void hop.
+        if (packet.routingMode == RoutingMode.PERIMETER && packet.voidHopCount >= MAX_VOID_HOPS) {
+            return ForwardDecision.VoidLimitExceeded
+        }
+
+        // Perimeter hop: forward to the best-available neighbor even though it doesn't
+        // improve proximity to the destination. The voidHopCount budget prevents looping.
+        return ForwardDecision.PerimeterHop(best)
+    }
+
+    // ── Geometry ──────────────────────────────────────────────────────────────
+
+    private fun haversineKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val a    = sin(dLat / 2).pow(2) +
+                   cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * sin(dLon / 2).pow(2)
+        return EARTH_RADIUS_KM * 2 * atan2(sqrt(a), sqrt(1 - a))
     }
 
     companion object {
         const val DEFAULT_TTL = 7
+        /** Neighbor must be at least 5 % closer for a greedy advance to qualify. */
+        private const val IMPROVEMENT_THRESHOLD = 0.95
+        /** Maximum consecutive perimeter hops before the packet is held for re-evaluation. */
+        const val MAX_VOID_HOPS = 3
+        private const val EARTH_RADIUS_KM = 6371.0
     }
 }
