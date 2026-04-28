@@ -69,6 +69,10 @@ class ConversationRepository(
         messageDao.updateStatus(messageId, status.name.lowercase())
     }
 
+    suspend fun updateMessageDelivered(messageId: String, hopCount: Int) {
+        messageDao.updateStatusAndHopCount(messageId, MessageStatus.DELIVERED.name.lowercase(), hopCount)
+    }
+
     suspend fun messageExists(messageId: String): Boolean =
         messageDao.exists(messageId) > 0
 

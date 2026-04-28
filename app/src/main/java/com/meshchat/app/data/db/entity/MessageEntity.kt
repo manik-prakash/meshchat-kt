@@ -25,7 +25,8 @@ data class MessageEntity(
     @ColumnInfo(name = "sender_device_id") val senderDeviceId: String,
     @ColumnInfo(name = "text") val text: String,
     @ColumnInfo(name = "status") val status: String = "sending",
-    @ColumnInfo(name = "created_at") val createdAt: Long
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+    @ColumnInfo(name = "delivered_hop_count") val deliveredHopCount: Int? = null
 )
 
 fun MessageEntity.toDomain() = Message(
@@ -43,7 +44,8 @@ fun MessageEntity.toDomain() = Message(
         "failed_expired"     -> MessageStatus.FAILED_EXPIRED
         else                 -> MessageStatus.SENDING
     },
-    createdAt = createdAt
+    createdAt = createdAt,
+    deliveredHopCount = deliveredHopCount
 )
 
 fun Message.toEntity() = MessageEntity(
@@ -52,5 +54,6 @@ fun Message.toEntity() = MessageEntity(
     senderDeviceId = senderDeviceId,
     text = text,
     status = status.name.lowercase(),
-    createdAt = createdAt
+    createdAt = createdAt,
+    deliveredHopCount = deliveredHopCount
 )

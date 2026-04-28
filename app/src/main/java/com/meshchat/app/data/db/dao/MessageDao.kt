@@ -18,6 +18,9 @@ interface MessageDao {
     @Query("UPDATE messages SET status = :status WHERE id = :messageId")
     suspend fun updateStatus(messageId: String, status: String)
 
+    @Query("UPDATE messages SET status = :status, delivered_hop_count = :hopCount WHERE id = :messageId")
+    suspend fun updateStatusAndHopCount(messageId: String, status: String, hopCount: Int)
+
     @Query("SELECT COUNT(*) FROM messages WHERE id = :messageId")
     suspend fun exists(messageId: String): Int
 }

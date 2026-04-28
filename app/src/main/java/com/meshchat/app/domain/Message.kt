@@ -24,5 +24,6 @@ data class Message(
     val senderDeviceId: String,
     val text: String,
     val status: MessageStatus,
-    val createdAt: Long
+    val createdAt: Long,
+    val deliveredHopCount: Int? = null
 )

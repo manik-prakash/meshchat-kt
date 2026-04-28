@@ -59,6 +59,7 @@ sealed class BlePayload {
         val packetId: String,
         val destinationNodeId: String,
         val timestamp: Long,
+        val hopCount: Int = 0,
         val signature: String = ""
     ) : BlePayload()
 

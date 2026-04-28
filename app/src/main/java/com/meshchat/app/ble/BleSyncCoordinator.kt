@@ -207,7 +207,7 @@ class BleSyncCoordinator(
             Log.w(TAG, "DeliveryAck sig invalid for ${ack.packetId}")
             return
         }
-        conversationRepo.updateMessageStatus(ack.packetId, MessageStatus.DELIVERED)
+        conversationRepo.updateMessageDelivered(ack.packetId, ack.hopCount)
         meshRepo.markRelayDelivered(ack.packetId)
         Log.d(TAG, "DeliveryAck: ${ack.packetId} delivered")
     }

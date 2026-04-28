@@ -60,7 +60,7 @@ class AppContainer(app: Application) {
         val identity = identityRepository.ensureIdentity()
         val now      = System.currentTimeMillis()
         val sig      = crypto.signDeliveryAck(packet.packetId, identity.publicKey, now)
-        val ack      = BlePayload.DeliveryAck(packet.packetId, identity.publicKey, now, sig)
+        val ack      = BlePayload.DeliveryAck(packet.packetId, identity.publicKey, now, packet.hopCount, sig)
         Log.d(tag, "Emit DeliveryAck packet=${packet.packetId.takeLast(8)} from=${identity.publicKey.take(12)}")
         // Use the bidirectional broadcast so the ACK reaches the sender regardless of
         // which device initiated the BLE connection (central vs peripheral role).

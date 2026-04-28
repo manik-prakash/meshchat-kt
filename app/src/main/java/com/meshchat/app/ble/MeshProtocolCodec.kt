@@ -25,7 +25,7 @@ import java.util.concurrent.ConcurrentHashMap
  *                        [geoHint:1+n] [ttl:1] [hopCount:1] [voidHopCount:1] [routingMode:1]
  *                        [timestamp:8BE] [sig:1+n] [body:2+n]
  *   0x06 routeAck:       [packetId:1+n] [hopNodeId:1+n] [timestamp:8BE]
- *   0x07 deliveryAck:    [packetId:1+n] [dstNodeId:1+n] [timestamp:8BE] [sig:1+n]
+ *   0x07 deliveryAck:    [packetId:1+n] [dstNodeId:1+n] [timestamp:8BE] [sig:1+n] [hopCount:1]
  *   0x08 routeFailure:   [packetId:1+n] [failNodeId:1+n] [reason:1] [timestamp:8BE] [sig:1+n]
  *
  * Fragmentation for payloads > CHUNK_SIZE:
@@ -147,6 +147,7 @@ object MeshProtocolCodec {
                 out.writeStr1(payload.destinationNodeId)
                 out.writeLongBE(payload.timestamp)
                 out.writeStr1(payload.signature)
+                out.write(payload.hopCount and 0xFF)
             }
             is BlePayload.RouteFailure -> {
                 out.write(TYPE_ROUTE_FAILURE.toInt())
@@ -329,8 +330,9 @@ object MeshProtocolCodec {
                 val (packetId, o1)  = bytes.readStr1(off)
                 val (dstNodeId, o2) = bytes.readStr1(o1)
                 val timestamp       = bytes.readLongBE(o2)
-                val (sig, _)        = bytes.readStr1(o2 + 8)
-                BlePayload.DeliveryAck(packetId = packetId, destinationNodeId = dstNodeId, timestamp = timestamp, signature = sig)
+                val (sig, o3)       = bytes.readStr1(o2 + 8)
+                val hopCount        = if (o3 < bytes.size) bytes[o3].toInt() and 0xFF else 0
+                BlePayload.DeliveryAck(packetId = packetId, destinationNodeId = dstNodeId, timestamp = timestamp, hopCount = hopCount, signature = sig)
             }
             TYPE_ROUTE_FAILURE -> {
                 val (packetId, o1)   = bytes.readStr1(off)

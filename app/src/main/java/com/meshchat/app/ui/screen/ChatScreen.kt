@@ -150,7 +150,14 @@ private fun MessageBubble(msg: Message, isMine: Boolean, onRetry: () -> Unit) {
                 MessageStatus.QUEUED             -> "[queued]"      to WarningColor
                 MessageStatus.FORWARDED          -> "~"             to Accent
                 MessageStatus.SENT               -> "v"             to TextMuted
-                MessageStatus.DELIVERED          -> "vv"            to Primary
+                MessageStatus.DELIVERED          -> {
+                    val hops = msg.deliveredHopCount
+                    val label = when {
+                        hops == null || hops == 0 -> "vv · direct"
+                        else                      -> "vv · ${hops}h"
+                    }
+                    label to Primary
+                }
                 MessageStatus.FAILED             -> "[failed]"      to ErrorColor
                 MessageStatus.FAILED_UNREACHABLE -> "[unreachable]" to ErrorColor
                 MessageStatus.FAILED_EXPIRED     -> "[expired]"     to ErrorColor
