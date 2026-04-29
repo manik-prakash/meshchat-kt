@@ -23,6 +23,9 @@ interface PeerDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(peer: PeerEntity)
 
+    @Query("SELECT * FROM peers WHERE device_id = :deviceId LIMIT 1")
+    suspend fun findByDeviceId(deviceId: String): PeerEntity?
+
     @Query("SELECT * FROM peers WHERE display_name = :displayName AND device_id != :excludeDeviceId LIMIT 1")
     suspend fun findByDisplayName(displayName: String, excludeDeviceId: String): PeerEntity?
 

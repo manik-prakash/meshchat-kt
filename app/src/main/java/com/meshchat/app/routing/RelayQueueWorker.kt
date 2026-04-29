@@ -91,7 +91,9 @@ class RelayQueueWorker(
                     val contact = meshRepository.getContact(entry.destinationPublicKey)
                     val isDirectNeighbor =
                         meshRepository.getNeighborByPublicKey(entry.destinationPublicKey) != null
-                    if (contact?.lastResolvedLat == null && !isDirectNeighbor) {
+                    val hasRelayCandidates =
+                        meshRepository.hasRecentRelayCandidates(entry.destinationPublicKey)
+                    if (contact?.lastResolvedLat == null && !isDirectNeighbor && !hasRelayCandidates) {
                         meshRepository.markRelayFailed(entry.packetId, FailureReason.STALE_DESTINATION_LOCATION)
                         conversationRepository.updateMessageStatus(entry.packetId, MessageStatus.FAILED_UNREACHABLE)
                         Log.d(TAG, "Stale-location fail ${entry.packetId.take(16)} after ${age / 1000}s")

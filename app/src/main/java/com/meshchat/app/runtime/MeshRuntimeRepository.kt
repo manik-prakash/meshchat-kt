@@ -7,6 +7,7 @@ import com.meshchat.app.ble.BleMeshManager
 import com.meshchat.app.ble.BleState
 import com.meshchat.app.ble.BleSyncCoordinator
 import com.meshchat.app.data.db.entity.RouteEventEntity
+import com.meshchat.app.data.repository.ConversationRepository
 import com.meshchat.app.data.repository.MeshRepository
 import com.meshchat.app.domain.Conversation
 import com.meshchat.app.domain.Peer
@@ -16,11 +17,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -37,17 +40,22 @@ data class MeshRuntimeStatus(
     val neighborCount: Int = 0,
     val queuedPacketCount: Int = 0,
     val lastRoutingStatus: String = "idle",
-    val persistentMeshEnabled: Boolean = false
+    val persistentMeshEnabled: Boolean = false,
+    val relayActive: Boolean = false,
+    val relaySummary: String? = null,
+    val relayPacketId: String? = null
 )
 
 class MeshRuntimeRepository(
     context: Context,
     private val meshPreferencesRepository: MeshPreferencesRepository,
+    private val conversationRepository: ConversationRepository,
     private val meshRepository: MeshRepository,
     private val bleMeshManager: BleMeshManager,
     private val bleSyncCoordinator: BleSyncCoordinator,
     private val beaconScheduler: BeaconScheduler,
-    private val relayQueueWorker: RelayQueueWorker
+    private val relayQueueWorker: RelayQueueWorker,
+    private val relayActivityTracker: RelayActivityTracker
 ) {
     private val tagInstance = Integer.toHexString(System.identityHashCode(this))
     private val appContext = context.applicationContext
@@ -82,17 +90,35 @@ class MeshRuntimeRepository(
         )
     }
 
+    private val relayClock: Flow<Long> = flow {
+        while (true) {
+            emit(System.currentTimeMillis())
+            delay(RELAY_STATUS_TICK_MS)
+        }
+    }
+
     val runtimeStatus: StateFlow<MeshRuntimeStatus> = combine(
         runtimeCore,
-        runtimeMetrics
-    ) { core, metrics ->
+        runtimeMetrics,
+        relayActivityTracker.latestRelay,
+        relayClock
+    ) { core, metrics, latestRelay, now ->
+        val relayActive = latestRelay != null && now - latestRelay.timestamp <= RELAY_ACTIVE_WINDOW_MS
+        val relaySummary = if (relayActive && latestRelay != null) {
+            "${latestRelay.sourceDisplayName} -> ${latestRelay.destinationDisplayName}"
+        } else {
+            null
+        }
         MeshRuntimeStatus(
             meshActive = core.active,
             bleState = core.bleState,
             neighborCount = metrics.neighborCount,
             queuedPacketCount = metrics.queuedPacketCount,
             lastRoutingStatus = formatRouteStatus(metrics.lastRouteEvent),
-            persistentMeshEnabled = core.persistentEnabled
+            persistentMeshEnabled = core.persistentEnabled,
+            relayActive = relayActive,
+            relaySummary = relaySummary,
+            relayPacketId = if (relayActive) latestRelay?.packetId else null
         )
     }.stateIn(
         scope = scope,
@@ -146,9 +172,13 @@ class MeshRuntimeRepository(
     }
 
     suspend fun connectAndOpen(peer: Peer): Conversation? {
-        val bleId = peer.bleId ?: return null
         ensureRuntimeActive()
-        return bleSyncCoordinator.connectAndOpen(bleId)
+        val bleId = peer.bleId
+        return if (bleId != null) {
+            bleSyncCoordinator.connectAndOpen(bleId)
+        } else {
+            conversationRepository.getOrCreateConversation(peer.deviceId, peer.displayName)
+        }
     }
 
     suspend fun ensureRuntimeActive() {
@@ -266,6 +296,8 @@ class MeshRuntimeRepository(
         private const val SCAN_LOOP_INTERVAL_MS = 15_000L
         private const val CLEANUP_INTERVAL_MS = 30_000L
         private const val SERVICE_START_TIMEOUT_MS = 5_000L
+        private const val RELAY_ACTIVE_WINDOW_MS = 8_000L
+        private const val RELAY_STATUS_TICK_MS = 1_000L
     }
 
     private data class RuntimeCore(

@@ -13,6 +13,7 @@ import com.meshchat.app.domain.BlePayload
 import com.meshchat.app.domain.MessageStatus
 import com.meshchat.app.location.LocationProvider
 import com.meshchat.app.runtime.MeshPreferencesRepository
+import com.meshchat.app.runtime.RelayActivityTracker
 import com.meshchat.app.runtime.MeshRuntimeRepository
 import com.meshchat.app.routing.MeshRouter
 import com.meshchat.app.routing.MeshRouterImpl
@@ -33,6 +34,7 @@ class AppContainer(app: Application) {
         db.knownContactDao(), db.routeEventDao()
     )
     val meshPreferencesRepository = MeshPreferencesRepository(app)
+    val relayActivityTracker = RelayActivityTracker()
     val bleMeshManager     = BleMeshManager(app, identityRepository, conversationRepository)
     val locationProvider   = LocationProvider(app)
 
@@ -79,7 +81,8 @@ class AppContainer(app: Application) {
         canReachBleAddress = bleMeshManager::canReachBleAddress,
         onQueuedForwarded  = { packetId ->
             conversationRepository.updateMessageStatus(packetId, MessageStatus.FORWARDED)
-        }
+        },
+        relayActivityTracker = relayActivityTracker
     )
 
     val relayQueueWorker = RelayQueueWorker(
@@ -101,11 +104,13 @@ class AppContainer(app: Application) {
     val meshRuntimeRepository = MeshRuntimeRepository(
         context = app,
         meshPreferencesRepository = meshPreferencesRepository,
+        conversationRepository = conversationRepository,
         meshRepository = meshRepository,
         bleMeshManager = bleMeshManager,
         bleSyncCoordinator = bleSyncCoordinator,
         beaconScheduler = beaconScheduler,
-        relayQueueWorker = relayQueueWorker
+        relayQueueWorker = relayQueueWorker,
+        relayActivityTracker = relayActivityTracker
     )
 }
 

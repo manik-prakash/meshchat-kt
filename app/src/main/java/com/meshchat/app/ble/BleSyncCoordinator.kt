@@ -48,6 +48,8 @@ class BleSyncCoordinator(
     private val messageBuffer = ConcurrentHashMap<String, MutableList<BlePayload.Message>>()
     // messageId -> ACK timeout job (legacy single-hop path)
     private val pendingAcks = ConcurrentHashMap<String, Job>()
+    private val latestBeacons = ConcurrentHashMap<String, BeaconFreshness>()
+    private val reversePaths = ReversePathRegistry()
     private var eventJob: Job? = null
 
     fun start() {
@@ -64,6 +66,8 @@ class BleSyncCoordinator(
         messageBuffer.clear()
         pendingAcks.values.forEach { it.cancel() }
         pendingAcks.clear()
+        latestBeacons.clear()
+        reversePaths.clear()
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -132,6 +136,9 @@ class BleSyncCoordinator(
             is BlePayload.Ack            -> handleAck(payload)
             is BlePayload.Beacon         -> handleBeacon(payload, fromAddress)
             is BlePayload.RoutedMessage  -> {
+                if (payload.sourcePublicKey != identityRepo.ensureIdentity().publicKey) {
+                    reversePaths.remember(payload.packetId, fromAddress)
+                }
                 Log.d(
                     TAG,
                     "RoutedMessage rx packet=${payload.packetId.takeLast(8)} from=$fromAddress " +
@@ -207,6 +214,19 @@ class BleSyncCoordinator(
             Log.w(TAG, "DeliveryAck sig invalid for ${ack.packetId}")
             return
         }
+        val upstream = reversePaths.takeUpstream(ack.packetId)
+        if (upstream != null) {
+            val forwarded = try {
+                bleMeshManager.sendDeliveryAckTo(ack, upstream)
+            } catch (e: Exception) {
+                Log.w(TAG, "DeliveryAck targeted forward failed for ${ack.packetId}: ${e.message}")
+                false
+            }
+            if (!forwarded) {
+                bleMeshManager.broadcastDeliveryAck(ack)
+            }
+            return
+        }
         conversationRepo.updateMessageDelivered(ack.packetId, ack.hopCount)
         meshRepo.markRelayDelivered(ack.packetId)
         Log.d(TAG, "DeliveryAck: ${ack.packetId} delivered")
@@ -218,6 +238,19 @@ class BleSyncCoordinator(
                 TAG,
                 "RouteFailure rx packet=${failure.packetId.takeLast(8)} from=${failure.failingNodeId.take(12)} reason=${failure.reason}"
             )
+            val upstream = reversePaths.takeUpstream(failure.packetId)
+            if (upstream != null) {
+                val forwarded = try {
+                    bleMeshManager.sendRouteFailureTo(failure, upstream)
+                } catch (e: Exception) {
+                    Log.w(TAG, "RouteFailure targeted forward failed for ${failure.packetId}: ${e.message}")
+                    false
+                }
+                if (!forwarded) {
+                    bleMeshManager.broadcastRouteFailure(failure)
+                }
+                return@launch
+            }
             conversationRepo.updateMessageStatus(failure.packetId, MessageStatus.FAILED_EXPIRED)
             meshRepo.markRelayFailed(failure.packetId, failure.reason)
             Log.d(TAG, "RouteFailure for ${failure.packetId}: ${failure.reason}")
@@ -250,37 +283,76 @@ class BleSyncCoordinator(
             return
         }
 
-        val existing = meshRepo.getNeighborByPublicKey(beacon.nodeId)
-        meshRepo.upsertNeighbor(
-            NeighborEntity(
-                neighborPublicKey = beacon.nodeId,
-                displayName       = beacon.displayName,
-                bleAddress        = fromAddress,
-                rssi              = existing?.rssi,
-                lastSeen          = now,
-                relayCapable      = beacon.relayCapable,
-                geohash           = beacon.geohash.ifEmpty { null },
-                lat               = if (beacon.lat != 0.0) beacon.lat else null,
-                lon               = if (beacon.lon != 0.0) beacon.lon else null,
-                trustScore        = existing?.trustScore ?: 0.0
-            )
+        val previous = latestBeacons[beacon.nodeId]
+        if (!BeaconObservationPolicy.shouldAccept(previous, beacon.seqNum, beacon.timestamp)) {
+            Log.d(TAG, "Ignoring older beacon from ${beacon.nodeId.take(16)} seq=${beacon.seqNum}")
+            return
+        }
+        latestBeacons[beacon.nodeId] = BeaconFreshness(beacon.seqNum, beacon.timestamp)
+
+        val fromPeerKey = resolvedPeerKeys[fromAddress]
+        val isForwardedBeacon = fromPeerKey != null && fromPeerKey != beacon.nodeId
+        val directNeighbor = if (isForwardedBeacon) null else meshRepo.getNeighborByPublicKey(beacon.nodeId)
+        val mergedLocation = BeaconObservationPolicy.mergeLocation(
+            existingGeohash = directNeighbor?.geohash,
+            existingLat = directNeighbor?.lat,
+            existingLon = directNeighbor?.lon,
+            beaconGeohash = beacon.geohash,
+            beaconLat = beacon.lat,
+            beaconLon = beacon.lon
         )
 
-        if (beacon.geohash.isNotEmpty()) {
-            val contact = meshRepo.getContact(beacon.nodeId)
-            if (contact != null) {
-                meshRepo.updateContactLocation(beacon.nodeId, beacon.geohash, beacon.lat, beacon.lon)
-            }
+        if (!isForwardedBeacon) {
+            meshRepo.upsertNeighbor(
+                NeighborEntity(
+                    neighborPublicKey = beacon.nodeId,
+                    displayName = beacon.displayName,
+                    bleAddress = fromAddress,
+                    rssi = directNeighbor?.rssi,
+                    lastSeen = now,
+                    relayCapable = beacon.relayCapable,
+                    geohash = mergedLocation.geohash,
+                    lat = mergedLocation.lat,
+                    lon = mergedLocation.lon,
+                    trustScore = directNeighbor?.trustScore ?: 0.0
+                )
+            )
+        }
+
+        meshRepo.ensureContact(beacon.nodeId, beacon.displayName)
+        conversationRepo.upsertPeer(
+            Peer(
+                deviceId = beacon.nodeId,
+                displayName = beacon.displayName,
+                lastSeen = now,
+                rssi = if (isForwardedBeacon) null else directNeighbor?.rssi,
+                bleId = if (isForwardedBeacon) null else fromAddress
+            )
+        )
+        if (mergedLocation.hasFreshLocation) {
+            meshRepo.updateContactLocation(
+                publicKey = beacon.nodeId,
+                displayName = beacon.displayName,
+                geohash = mergedLocation.geohash,
+                lat = mergedLocation.lat,
+                lon = mergedLocation.lon
+            )
         }
 
         // Every beacon from a relay-capable neighbor can unlock a previously un-routable packet,
         // so trigger a queue drain attempt every time. The drain is a no-op when the queue is
         // empty, so the overhead is just one DB read per beacon.
-        if (beacon.relayCapable) {
+        if (!isForwardedBeacon && beacon.relayCapable) {
             meshRouter.onNeighborAvailable(beacon.nodeId)
         }
 
-        Log.d(TAG, "Beacon from ${beacon.displayName} geo=${beacon.geohash.ifEmpty { "none" }}")
+        forwardBeaconToRelays(beacon, fromAddress)
+
+        Log.d(
+            TAG,
+            "Beacon from ${beacon.displayName} geo=${beacon.geohash.ifEmpty { "none" }} " +
+                "direct=${!isForwardedBeacon}"
+        )
     }
 
     // ── Neighbor registration ─────────────────────────────────────────────────
@@ -301,6 +373,16 @@ class BleSyncCoordinator(
                 trustScore        = existing?.trustScore ?: 0.0
             )
         )
+        meshRepo.ensureContact(publicKey, displayName)
+        if (existing?.geohash != null || (existing?.lat != null && existing.lon != null)) {
+            meshRepo.updateContactLocation(
+                publicKey = publicKey,
+                displayName = displayName,
+                geohash = existing.geohash,
+                lat = existing.lat,
+                lon = existing.lon
+            )
+        }
     }
 
     // ── Session resolution ────────────────────────────────────────────────────
@@ -328,5 +410,20 @@ class BleSyncCoordinator(
                  lastSeen = System.currentTimeMillis(), rssi = null, bleId = bleId)
         )
         return conv
+    }
+
+    private suspend fun forwardBeaconToRelays(beacon: BlePayload.Beacon, fromAddress: String) {
+        val relayTargets = BeaconRelayPlanner.selectRelayTargets(
+            neighbors = meshRepo.getRecentNeighbors(MeshRepository.NEIGHBOR_STALE_MS),
+            inboundAddress = fromAddress
+        )
+
+        for (bleAddress in relayTargets) {
+            try {
+                bleMeshManager.sendBeaconTo(beacon, bleAddress)
+            } catch (e: Exception) {
+                Log.w(TAG, "Beacon forward failed to $bleAddress: ${e.message}")
+            }
+        }
     }
 }

@@ -443,31 +443,11 @@ class BleMeshManager(
     }
 
     suspend fun sendRoutedMessageTo(packet: BlePayload.RoutedMessage, bleAddress: String): Boolean {
-        val fragments = MeshProtocolCodec.encode(packet, chunkSize)
         Log.d(
             TAG,
-            "sendRoutedMessageTo packet=${packet.packetId.takeLast(8)} ble=$bleAddress " +
-                "fragments=${fragments.size} mtu=$negotiatedMtu"
+            "sendRoutedMessageTo packet=${packet.packetId.takeLast(8)} ble=$bleAddress mtu=$negotiatedMtu"
         )
-
-        if (connectedGatt?.device?.address == bleAddress) {
-            val gatt = connectedGatt ?: return false
-            writeFragmentsCentral(gatt, MESSAGE_CHAR_UUID, packet)
-            Log.d(TAG, "sendRoutedMessageTo path=central packet=${packet.packetId.takeLast(8)}")
-            return true
-        }
-
-        if (gattServer.isConnectedTo(bleAddress)) {
-            for (fragment in fragments) {
-                val sent = gattServer.sendNotificationTo(bleAddress, MESSAGE_CHAR_UUID, fragment)
-                if (!sent) return false
-            }
-            Log.d(TAG, "sendRoutedMessageTo path=peripheral packet=${packet.packetId.takeLast(8)}")
-            return true
-        }
-
-        Log.d(TAG, "sendRoutedMessageTo no active path packet=${packet.packetId.takeLast(8)} ble=$bleAddress")
-        return false
+        return sendPayloadTo(packet, MESSAGE_CHAR_UUID, bleAddress)
     }
 
     suspend fun broadcastRouteFailure(failure: BlePayload.RouteFailure) {
@@ -479,6 +459,9 @@ class BleMeshManager(
             try { writeFragmentsCentral(gatt, MESSAGE_CHAR_UUID, failure) } catch (_: Exception) {}
         }
     }
+
+    suspend fun sendRouteFailureTo(failure: BlePayload.RouteFailure, bleAddress: String): Boolean =
+        sendPayloadTo(failure, MESSAGE_CHAR_UUID, bleAddress)
 
     /**
      * Send a DeliveryAck over every available BLE path.
@@ -502,6 +485,9 @@ class BleMeshManager(
         }
     }
 
+    suspend fun sendDeliveryAckTo(ack: BlePayload.DeliveryAck, bleAddress: String): Boolean =
+        sendPayloadTo(ack, ACK_CHAR_UUID, bleAddress)
+
     suspend fun broadcastBeacon(beacon: BlePayload.Beacon) {
         val fragments = MeshProtocolCodec.encode(beacon, chunkSize)
         if (gattServer.connectedDeviceCount > 0) {
@@ -513,6 +499,9 @@ class BleMeshManager(
             try { writeFragmentsCentral(gatt, MESSAGE_CHAR_UUID, beacon) } catch (_: Exception) {}
         }
     }
+
+    suspend fun sendBeaconTo(beacon: BlePayload.Beacon, bleAddress: String): Boolean =
+        sendPayloadTo(beacon, MESSAGE_CHAR_UUID, bleAddress)
 
     suspend fun sendAck(messageId: String) {
         val payload = BlePayload.Ack(messageId)
@@ -549,6 +538,29 @@ class BleMeshManager(
         } finally {
             gattWriteMutex.unlock()
         }
+    }
+
+    private suspend fun sendPayloadTo(payload: BlePayload, charUUID: String, bleAddress: String): Boolean {
+        val fragments = MeshProtocolCodec.encode(payload, chunkSize)
+
+        if (connectedGatt?.device?.address == bleAddress) {
+            val gatt = connectedGatt ?: return false
+            writeFragmentsCentral(gatt, charUUID, payload)
+            Log.d(TAG, "sendPayloadTo path=central ble=$bleAddress type=${payload::class.simpleName}")
+            return true
+        }
+
+        if (gattServer.isConnectedTo(bleAddress)) {
+            for (fragment in fragments) {
+                val sent = gattServer.sendNotificationTo(bleAddress, charUUID, fragment)
+                if (!sent) return false
+            }
+            Log.d(TAG, "sendPayloadTo path=peripheral ble=$bleAddress type=${payload::class.simpleName}")
+            return true
+        }
+
+        Log.d(TAG, "sendPayloadTo no active path ble=$bleAddress type=${payload::class.simpleName}")
+        return false
     }
 
     @Suppress("DEPRECATION")

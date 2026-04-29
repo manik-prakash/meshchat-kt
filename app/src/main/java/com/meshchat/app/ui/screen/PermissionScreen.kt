@@ -273,9 +273,9 @@ private fun PrimaryButton(label: String, onClick: () -> Unit) {
     Button(
         onClick  = onClick,
         modifier = Modifier.fillMaxWidth(),
-        colors   = ButtonDefaults.buttonColors(containerColor = Primary, contentColor = Background)
+        colors   = ButtonDefaults.buttonColors(containerColor = Primary, contentColor = PrimaryInk)
     ) {
-        Text(label, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+        Text(label, fontFamily = FontFamily.Monospace, fontSize = 13.sp, color = PrimaryInk)
     }
 }
 

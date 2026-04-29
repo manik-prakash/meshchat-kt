@@ -19,6 +19,9 @@ class ConversationRepository(
     private val messageDao: MessageDao,
     private val peerDao: PeerDao
 ) {
+    fun getPeers(): Flow<List<Peer>> =
+        peerDao.getAll().map { list -> list.map { it.toDomain() } }
+
     fun getConversations(): Flow<List<Conversation>> =
         conversationDao.getAll().map { list -> list.map { it.toDomain() } }
 
@@ -86,12 +89,18 @@ class ConversationRepository(
         conversationDao.updatePeerIdentity(conversationId, newDeviceId, newDisplayName)
 
     suspend fun upsertPeer(peer: Peer) {
-        val existing = peerDao.findByDisplayName(peer.displayName, peer.deviceId)
-        if (existing != null) {
-            peerDao.update(existing.deviceId, peer.lastSeen, peer.rssi, peer.bleId)
+        val existing = peerDao.findByDeviceId(peer.deviceId)
+        val merged = if (existing != null) {
+            existing.copy(
+                displayName = peer.displayName,
+                lastSeen = maxOf(existing.lastSeen, peer.lastSeen),
+                rssi = peer.rssi ?: existing.rssi,
+                bleId = peer.bleId ?: existing.bleId
+            )
         } else {
-            peerDao.insert(peer.toEntity())
+            peer.toEntity()
         }
+        peerDao.insert(merged)
     }
 }
 

@@ -87,9 +87,17 @@ fun NearbyScreen(vm: NearbyViewModel, onOpenChat: (Conversation) -> Unit) {
                 item {
                     CapabilityBanner(
                         "[~] location not granted — geo-routing disabled. " +
-                        "Messages will be delivered by direct connection only."
+                        "Direct and relay delivery still work when nearby nodes can forward."
                     )
                 }
+            }
+        }
+
+        if (uiState.runtimeStatus.relayActive) {
+            item {
+                CapabilityBanner(
+                    "[relay] forwarding ${uiState.runtimeStatus.relaySummary ?: "mesh traffic now"}"
+                )
             }
         }
 
@@ -196,9 +204,10 @@ private fun PeerRow(peer: Peer, connecting: Boolean, onClick: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
+            val routeHint = if (peer.bleId == null) "  via relay" else ""
             Text(peer.displayName, fontFamily = FontFamily.Monospace, fontSize = 14.sp, color = Primary)
             Text(
-                "id:${peer.deviceId.take(8)}  ${formatLastSeen(peer.lastSeen)}",
+                "id:${peer.deviceId.take(8)}  ${formatLastSeen(peer.lastSeen)}$routeHint",
                 fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = TextMuted
             )
         }
@@ -242,6 +251,7 @@ private fun NeighborRow(neighbor: NeighborEntity) {
 @Composable
 private fun StateBadge(status: MeshRuntimeStatus) {
     val (text, color) = when {
+        status.relayActive                      -> "RELAYING"   to Accent
         !status.meshActive                     -> "STOPPED"    to TextMuted
         status.bleState == BleState.SCANNING   -> "SCANNING"   to Accent
         status.bleState == BleState.CONNECTING -> "CONNECTING" to WarningColor

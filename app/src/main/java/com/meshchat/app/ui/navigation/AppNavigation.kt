@@ -128,6 +128,7 @@ fun AppNavigation() {
             MainScaffold(currentRoute = it.destination, navController = navController) {
                 val vm: NearbyViewModel = viewModel {
                     NearbyViewModel(
+                        app.container.conversationRepository,
                         app.container.meshRepository,
                         app.container.meshRuntimeRepository
                     )

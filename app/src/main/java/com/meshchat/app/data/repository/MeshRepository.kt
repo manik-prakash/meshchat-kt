@@ -130,17 +130,64 @@ class MeshRepository(
     suspend fun getContact(publicKey: String): KnownContactEntity? =
         knownContactDao.getByPublicKey(publicKey)
 
+    suspend fun ensureContact(publicKey: String, displayName: String) {
+        val existing = knownContactDao.getByPublicKey(publicKey)
+        if (existing == null) {
+            knownContactDao.upsert(
+                KnownContactEntity(
+                    publicKey = publicKey,
+                    displayName = displayName,
+                    lastResolvedGeoHash = null,
+                    lastResolvedLat = null,
+                    lastResolvedLon = null,
+                    lastLocationAt = null
+                )
+            )
+            return
+        }
+
+        if (existing.displayName != displayName) {
+            knownContactDao.upsert(existing.copy(displayName = displayName))
+        }
+    }
+
     suspend fun upsertContact(contact: KnownContactEntity) {
         knownContactDao.upsert(contact)
     }
 
     suspend fun updateContactLocation(
         publicKey: String,
+        displayName: String,
         geohash: String?,
         lat: Double?,
         lon: Double?
     ) {
-        knownContactDao.updateLocation(publicKey, geohash, lat, lon, System.currentTimeMillis())
+        val now = System.currentTimeMillis()
+        val existing = knownContactDao.getByPublicKey(publicKey)
+        if (existing == null) {
+            knownContactDao.upsert(
+                KnownContactEntity(
+                    publicKey = publicKey,
+                    displayName = displayName,
+                    lastResolvedGeoHash = geohash,
+                    lastResolvedLat = lat,
+                    lastResolvedLon = lon,
+                    lastLocationAt = now
+                )
+            )
+            return
+        }
+
+        knownContactDao.updateLocation(publicKey, geohash, lat, lon, now)
+    }
+
+    suspend fun hasRecentRelayCandidates(
+        excludePublicKey: String? = null,
+        windowMs: Long = NEIGHBOR_STALE_MS
+    ): Boolean = getRecentNeighbors(windowMs).any {
+        it.relayCapable &&
+            !it.bleAddress.isNullOrBlank() &&
+            it.neighborPublicKey != excludePublicKey
     }
 
     // --- Route events ---

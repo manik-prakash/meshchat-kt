@@ -120,10 +120,10 @@ fun SettingsScreen(vm: SettingsViewModel) {
             Spacer(Modifier.height(8.dp))
             Button(
                 onClick = { vm.saveDisplayName(nameInput) },
-                colors  = ButtonDefaults.buttonColors(containerColor = Primary, contentColor = Background),
+                colors  = ButtonDefaults.buttonColors(containerColor = Primary, contentColor = PrimaryInk),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text(if (saved) "[SAVED]" else "[SAVE]", fontFamily = FontFamily.Monospace, fontSize = 14.sp)
+                Text(if (saved) "[SAVED]" else "[SAVE]", fontFamily = FontFamily.Monospace, fontSize = 14.sp, color = PrimaryInk)
             }
 
             Spacer(Modifier.height(20.dp))

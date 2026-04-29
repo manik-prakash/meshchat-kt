@@ -3,6 +3,7 @@ package com.meshchat.app.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.meshchat.app.data.db.entity.NeighborEntity
+import com.meshchat.app.data.repository.ConversationRepository
 import com.meshchat.app.data.repository.MeshRepository
 import com.meshchat.app.domain.Conversation
 import com.meshchat.app.domain.Peer
@@ -22,6 +23,7 @@ data class NearbyUiState(
 )
 
 class NearbyViewModel(
+    private val conversationRepository: ConversationRepository,
     private val meshRepository: MeshRepository,
     private val meshRuntimeRepository: MeshRuntimeRepository
 ) : ViewModel() {
@@ -32,7 +34,7 @@ class NearbyViewModel(
     init {
         viewModelScope.launch {
             combine(
-                meshRuntimeRepository.discoveredPeers,
+                conversationRepository.getPeers(),
                 meshRepository.getNeighbors(),
                 meshRuntimeRepository.runtimeStatus
             ) { peers, neighbors, runtimeStatus ->

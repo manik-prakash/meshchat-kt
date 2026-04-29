@@ -85,10 +85,10 @@ fun OnboardingScreen(vm: OnboardingViewModel, onDone: () -> Unit) {
             Spacer(Modifier.height(12.dp))
             Button(
                 onClick = { vm.confirmName(nameInput.ifBlank { identity!!.displayName }) },
-                colors  = ButtonDefaults.buttonColors(containerColor = Primary, contentColor = Background),
+                colors  = ButtonDefaults.buttonColors(containerColor = Primary, contentColor = PrimaryInk),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("[BOOT]", fontFamily = FontFamily.Monospace, fontSize = 14.sp)
+                Text("[BOOT]", fontFamily = FontFamily.Monospace, fontSize = 14.sp, color = PrimaryInk)
             }
         }
     }
